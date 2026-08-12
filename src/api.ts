@@ -62,7 +62,14 @@ function twapServerUrl(): string {
   return url === undefined || url === null ? DEFAULT_SERVER_URL : url;
 }
 
-export type Strategy = "MAKER" | "TAKER";
+/**
+ * Execution style for a ticket. "MAKER" rests PostOnly clips at the L1 touch
+ * (maker fees, with a taker sweep near the deadline so the window still
+ * holds); "TWAP" is the sliced-IOC default the engine has always run. The
+ * server maps these to concrete executor strategies (maker_l1 / signal_twap);
+ * it also still accepts "TAKER", the name this option had before 1.2.0.
+ */
+export type Strategy = "MAKER" | "TWAP";
 
 /**
  * An onboarded account. Carries no secret — the signing key stays in IndexedDB
@@ -553,7 +560,7 @@ export interface PlaceTicketParams {
   target_position: number;
   /** Execution deadline in ms (0 = immediate / market). */
   time_constraint_ms: number;
-  /** Execution-style hint. NOTE: not yet in the server ticket schema (TODO §5). */
+  /** Execution style — see [`Strategy`]. Omitted = TWAP. */
   strategy?: Strategy;
 }
 
