@@ -28,11 +28,13 @@ delegating for 30 days. Nothing reusable is stored in their browser.
 
 | Symbol | Supported |
 |---|---|
-| `PERP_ETH_USDC` — shared market | ✅ |
-| `PERP_ETH_USDC_<broker>` — broker-exclusive | ❌ |
+| `PERP_ETH_USDC` — official Orderly listing | ✅ |
+| `PERP_CTEST_USDC_<suffix>` — non-official listing | ❌ |
 
-Broker-exclusive markets are not supported. On one, the panel says so and names
-the market rather than rendering a form that would fail later.
+A symbol with a fourth segment is not an official Orderly listing (every DEX can
+trade it — it is not broker-exclusive — but it trades in isolated-margin mode
+only). Smart execution trades cross-margin, so these are not supported: the panel
+says so and names the market rather than rendering a form that would fail later.
 
 ## How a request proves who it is
 

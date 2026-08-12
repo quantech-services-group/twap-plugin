@@ -62,20 +62,20 @@ function splitSymbol(sym?: string): { base: string; quote: string } {
 /**
  * Whether the execution engine can trade this market.
  *
- * Orderly has two kinds of symbol. Shared markets are `PERP_<BASE>_USDC`, and a
- * broker that lists its own adds a fourth segment naming itself —
- * `PERP_AAPL_USDC_mythos`. On mainnet that is 50 of 130 markets, nearly all of
- * them `mythos`, and nearly all of the equities.
+ * Orderly symbols come in two shapes. An official listing is `PERP_<BASE>_USDC`
+ * (three segments). A symbol with a fourth segment — `PERP_CTEST_USDC_alpix` —
+ * is NOT an official Orderly listing; the suffix is who requested the listing,
+ * not who it belongs to. Per Orderly (2026-08-11): every DEX can trade these,
+ * they are not broker-exclusive — the one thing that sets them apart is that
+ * they trade in **isolated-margin mode only**.
  *
- * The engine cannot round-trip the fourth segment: its `Symbol` type holds a
- * base and a quote, so an order goes back out as `PERP_AAPL_USDC`, which is not
- * a market that exists. Two further things would need solving even then — those
- * markets require isolated margin, and several accept only POST_ONLY while the
- * strategy sends IOC.
+ * We do not support them, and isolated-margin-only is the reason: the engine
+ * trades cross-margin, and it also cannot round-trip the fourth segment (its
+ * `Symbol` type is base+quote, so the order would go back out as
+ * `PERP_CTEST_USDC` — a market that does not exist).
  *
- * So this is checked here rather than left to fail later. Placing the ticket
- * would otherwise succeed, and it would sit at OPEN until its deadline with
- * nothing happening and nothing logged.
+ * Checked here rather than left to fail later: placing the ticket would
+ * otherwise succeed and then sit at OPEN until its deadline, doing nothing.
  */
 function isSupportedMarket(symbol: string): boolean {
   const parts = symbol.split("_");
@@ -273,18 +273,17 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   // cannot trade; letting someone fill the form in and submit would place a
   // ticket that sits at OPEN until its deadline, doing nothing.
   if (!supported) {
-    // Name the asset and the broker, and say the limit is this market rather
-    // than the asset. Without that it reads as arbitrary: on the same exchange
-    // TSLA works and AAPL does not, because TSLA is listed as a shared market
-    // and AAPL only as `PERP_AAPL_USDC_mythos`. A trader who is not told this
-    // concludes the panel is broken.
-    const broker = orderlySymbol.split("_").slice(3).join("_");
+    // Say the limit is this market, not the asset, and why — otherwise it
+    // reads as arbitrary (the same asset can have an official listing that
+    // works and a non-official one that does not). A fourth segment marks a
+    // non-official listing, which trades isolated-margin-only; the engine
+    // trades cross-margin, so it cannot work these.
     return (
       <div className="oui-flex oui-flex-col oui-items-center oui-gap-1.5 oui-rounded-lg oui-bg-base-8 oui-p-4 oui-text-center oui-text-sm">
         <span className="oui-text-base-contrast">TWAP is not available for {base}</span>
         <span className="oui-text-xs oui-text-base-contrast-36">
-          This is a broker-exclusive market{broker ? ` (${broker})` : ""}. Smart execution supports
-          shared markets only.
+          This market is not an official Orderly listing, so it trades in
+          isolated-margin mode only, which smart execution does not support.
         </span>
         <span className="oui-text-xs oui-text-base-contrast-36">
           Use the exchange&apos;s own order types for {base}.
