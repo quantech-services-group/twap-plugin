@@ -160,7 +160,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
 
   const [busy, setBusy] = React.useState(false);
 
-  async function enableTwap() {
+  const enableTwap = React.useCallback(async () => {
     setError("");
     setBusy(true);
     try {
@@ -192,7 +192,25 @@ export function BotPanel({ symbol }: { symbol?: string }) {
     } finally {
       setBusy(false);
     }
-  }
+  }, [address, brokerId, chainId, keyStore]);
+
+  // Adopt automatically — there is no signature behind it and the order form
+  // already adopts on first place, so there is no "Enable TWAP" button: a click
+  // with nothing on the other side of it is pure friction. While a session is
+  // missing and a trading key is present, adopt silently; retry on a slow
+  // cadence so a transient failure (Orderly briefly unreachable) recovers on
+  // its own without a button and without hammering in a tight loop.
+  React.useEffect(() => {
+    if (!needsSignIn) return;
+    const tryAdopt = () => {
+      if (busy || !address || !brokerId || !chainId) return;
+      if (!keyStore.getOrderlyKey(address)) return; // trading not enabled — nothing to adopt
+      void enableTwap();
+    };
+    tryAdopt();
+    const id = setInterval(tryAdopt, 10_000);
+    return () => clearInterval(id);
+  }, [needsSignIn, busy, address, brokerId, chainId, keyStore, enableTwap]);
 
   const end = React.useCallback(
     async (ticketId: string) => {
@@ -367,27 +385,19 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       </div>
 
       {needsSignIn ? (
-        // No wallet prompt behind this button anymore: it adopts the trading
-        // key the exchange's own "Enable Trading" already delegated. It stays a
-        // button (not automatic) because it shares this account's execution
-        // authority with the TWAP backend, and that should be a choice.
-        <div className="oui-flex oui-flex-col oui-items-center oui-gap-2 oui-px-3 oui-py-8">
-          <span className="oui-text-base-contrast-36">
-            Enable TWAP to place and track orders on your account.
-          </span>
-          <button
-            className="oui-rounded oui-bg-primary oui-px-3 oui-py-1.5 disabled:oui-opacity-50"
-            onClick={enableTwap}
-            disabled={busy}
-          >
-            {busy ? "Enabling TWAP…" : "Enable TWAP"}
-          </button>
-          {/* The error belongs here, not only next to the table. It used to
-              render under `error && rows`, and `rows` is null in this state --
-              so every failed click set a message that could not appear, and the
-              button looked like it did nothing at all. */}
+        // No button here — adoption is automatic (see the effect above). This
+        // is only what shows while it happens or if it cannot: when trading is
+        // not yet enabled there is no key to adopt, so point at the exchange's
+        // own "Enable Trading" (its action, not ours); otherwise adoption is in
+        // flight, or it errored and the effect will retry.
+        <div className="oui-flex oui-flex-col oui-items-center oui-gap-2 oui-px-3 oui-py-8 oui-text-center oui-text-base-contrast-36">
+          {address && !keyStore.getOrderlyKey(address) ? (
+            <span>Enable trading on the exchange to place and track TWAP orders.</span>
+          ) : (
+            <span>{busy ? "Setting up TWAP…" : "Loading your TWAP orders…"}</span>
+          )}
           {error && (
-            <span className="oui-max-w-[420px] oui-text-center oui-text-danger">{error}</span>
+            <span className="oui-max-w-[420px] oui-text-danger">{error}</span>
           )}
         </div>
       ) : (
