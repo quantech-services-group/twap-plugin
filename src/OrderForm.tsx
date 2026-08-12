@@ -26,6 +26,8 @@ import { AccountStatusEnum } from "@orderly.network/types";
 import {
   placeTicket,
   authorize,
+  waitForExecutorReady,
+  type Session,
   type Strategy,
 } from "./api.js";
 
@@ -200,11 +202,30 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       return await authorize(brokerId!, address!, chainId!, walletProvider);
     };
 
+    // Place, waiting out the one rejection that resolves itself. A trader who
+    // just onboarded races the execution engine's discovery of their account
+    // (up to a minute); the server answers 3009 "executor is not alive" until
+    // then. That message reads as an outage — the 2026-08-11 report — when the
+    // truth is "almost ready". So on 3009: say what is actually happening,
+    // wait for the engine to report ready, and place again. Safe to resend —
+    // a 3009-rejected placement wrote nothing.
+    const placeWhenReady = async (session?: Session) => {
+      try {
+        return await placeTicket(ticket, session);
+      } catch (e: any) {
+        if (e?.name !== "ExecutorNotReadyError") throw e;
+        setStatus("Setting up your account… this can take up to a minute");
+        await waitForExecutorReady(session);
+        setStatus("Placing…");
+        return await placeTicket(ticket, session);
+      }
+    };
+
     try {
       let session = await withSession();
       setStatus("Placing…");
       try {
-        const res = await placeTicket(ticket, session);
+        const res = await placeWhenReady(session);
         // Name the ticket so the trader can find this exact order in the Bot tab.
         setStatus(`Placed ${res.ticket_id.slice(0, 10)}… — see the Bot tab`);
       } catch (e: any) {
@@ -215,7 +236,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
         if (e?.name !== "NotSignedInError" || !hasWallet) throw e;
         session = await withSession();
         setStatus("Placing…");
-        const res = await placeTicket(ticket, session);
+        const res = await placeWhenReady(session);
         setStatus(`Placed ${res.ticket_id.slice(0, 10)}… — see the Bot tab`);
       }
     } catch (e: any) {

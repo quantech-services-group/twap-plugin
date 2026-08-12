@@ -435,6 +435,95 @@ export class NotSignedInError extends Error {
 }
 
 /**
+ * Thrown when the server rejects an order with code 3009 ("executor is not
+ * alive") — the account's execution context is not provisioned right now.
+ *
+ * For a trader who just onboarded this is the NORMAL case, not a failure: the
+ * executor discovers a new account moments after `onboard/complete` returns
+ * (see `authorize`), and the first order often races that discovery. Two
+ * traders hit exactly this on 2026-08-11; one was told "executor is not
+ * alive", concluded the product was down, and never placed again.
+ *
+ * A distinct type so the UI can wait for the executor and retry instead of
+ * showing that message. Retrying is safe: a 3009-rejected placement is
+ * rejected before anything is written, so no duplicate order can result.
+ */
+export class ExecutorNotReadyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecutorNotReadyError";
+  }
+}
+
+/** Executor lifecycle status, as reported by the server. */
+export type ExecutorStatus = "RUNNING" | "PAUSED" | "SHUTDOWN";
+
+/**
+ * The server's error body is `{code, message}`. `code` is what distinguishes
+ * "not provisioned yet" (3009, worth waiting out) from everything else — the
+ * HTTP status alone cannot: 503 is also what a proxy says when the backend is
+ * down, and that body is not JSON at all.
+ */
+function parseErrorCode(body: string): number | undefined {
+  try {
+    const code = (JSON.parse(body) as { code?: unknown }).code;
+    return typeof code === "number" ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * This account's executor status. `SHUTDOWN` covers "not provisioned yet" —
+ * the server reports a missing execution context the same way as a stopped
+ * one, so a fresh onboarding reads SHUTDOWN until the executor picks the
+ * account up, then RUNNING.
+ */
+export async function executorStatus(session?: Session): Promise<ExecutorStatus> {
+  const res = await call("GET", "/execution/v1/executor/status", session);
+  if (!res.ok) throw new Error(`executorStatus ${res.status}: ${await res.text()}`);
+  const body = (await res.json()) as { status?: ExecutorStatus };
+  if (body.status !== "RUNNING" && body.status !== "PAUSED" && body.status !== "SHUTDOWN") {
+    throw new Error(`executorStatus: unrecognized status ${JSON.stringify(body)}`);
+  }
+  return body.status;
+}
+
+/**
+ * Wait until this account's executor reports `RUNNING`, polling
+ * `executorStatus` every few seconds.
+ *
+ * The 90s ceiling is the executor's discovery worst case with margin: it
+ * re-reads the onboarded-accounts roster at least once a minute, and
+ * provisioning an account takes about a second. `PAUSED` fails immediately —
+ * a paused account is an operator's decision that polling will not reverse,
+ * and waiting the full window before saying so helps nobody.
+ */
+export async function waitForExecutorReady(
+  session?: Session,
+  timeoutMs = 90_000,
+  intervalMs = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // Status-read failures (a blip, a 502) are treated as "not ready yet"
+    // rather than thrown: this function's caller has already decided to wait,
+    // and the deadline bounds how long a persistent failure can stall them.
+    const status = await executorStatus(session).catch(() => undefined);
+    if (status === "RUNNING") return;
+    if (status === "PAUSED") {
+      throw new Error("Execution for this account is paused. Contact support to resume.");
+    }
+    if (Date.now() >= deadline) {
+      throw new ExecutorNotReadyError(
+        "The execution engine did not pick up this account in time. Please try again in a minute.",
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+/**
  * This account's tickets, newest first — the TWAP order history.
  *
  * Throws rather than returning `[]` on failure: an empty list is a real answer
@@ -501,7 +590,15 @@ export async function placeTicket(
     throw new NotSignedInError();
   }
   if (!res.ok) {
-    throw new Error(`placeTicket ${res.status}: ${await res.text()}`);
+    const body = await res.text();
+    // 3009 and ONLY 3009: "not provisioned yet" is worth waiting out (see
+    // ExecutorNotReadyError). Its neighbors are not — 3011 (paused) is an
+    // operator's decision, and any other failure retried on a timer would
+    // just fail again with the same message, later.
+    if (parseErrorCode(body) === 3009) {
+      throw new ExecutorNotReadyError(`placeTicket ${res.status}: ${body}`);
+    }
+    throw new Error(`placeTicket ${res.status}: ${body}`);
   }
   return (await res.json()) as PlaceTicketResponse;
 }
