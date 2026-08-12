@@ -16,6 +16,7 @@ import {
   useCollateral,
   useAccount,
   useConfig,
+  useKeyStore,
   useWalletConnector,
   useOrderStore,
   useSymbolInfo,
@@ -144,24 +145,25 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   const available = freeCollateral ?? 0;
 
   // Authenticated trader identity from the Orderly SDK session. The wallet
-  // ADDRESS drives our own session auth (challenge → sign → Bearer token); the
-  // order then executes on THIS trader's account, not a hardcoded one.
+  // ADDRESS names the account our backend derives; the order then executes on
+  // THIS trader's account, not a hardcoded one.
   const { state } = useAccount();
   const brokerId = useConfig<string>("brokerId");
   const address = state?.address;
 
-  // Sign through the wallet the trader actually connected (MetaMask,
-  // WalletConnect, Binance, …) rather than a hardcoded injected provider, so
-  // every wallet the host DEX supports works with this plugin.
-  const { wallet, connectedChain } = useWalletConnector();
-  const walletProvider = wallet?.provider as
-    | { request(args: { method: string; params?: unknown[] }): Promise<any> }
-    | undefined;
+  // The SDK keyStore holds the Orderly trading key that "Enable Trading"
+  // delegated to this browser. Onboarding ADOPTS that key (see api.authorize)
+  // instead of prompting the wallet for a second delegation — so placing a
+  // TWAP costs zero signatures. The chain still comes from the connector: it
+  // decides which Orderly cluster the account lives on.
+  const keyStore = useKeyStore();
+  const { connectedChain } = useWalletConnector();
   const chainId = connectedChain?.id ? Number(connectedChain.id) : undefined;
 
   // Only allow submitting once the trader has completed Orderly's own login
   // ("Enable Trading"). Before that there is no account context: balances and
-  // positions read 0, so a ticket would target a position we cannot see.
+  // positions read 0, so a ticket would target a position we cannot see. It is
+  // also what guarantees the keyStore holds a trading key for us to adopt.
   const isTradingEnabled = state?.status === AccountStatusEnum.EnableTrading;
 
   // Live progress is NOT tracked here. A placed ticket appears under Running in
@@ -190,16 +192,31 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       time_constraint_ms: timeoutMs,
       strategy, // MAKER (rest at the touch) / TWAP (sliced IOC) — see api.Strategy
     };
-    const hasWallet = !!(address && brokerId && walletProvider && chainId);
+    const hasWallet = !!(address && brokerId && chainId);
 
-    // Real auth: one signature delegates a trading key to the executor and
-    // returns the credential this order authenticates with, so it executes on
-    // THIS connected trader's account. Already authorized? No prompt. With no
-    // wallet available (local/demo harness) we fall back to the static key.
+    // Real auth, no signature: the SDK keyStore's Orderly key — the one
+    // "Enable Trading" already delegated — is re-read on EVERY submit and
+    // adopted by the backend, so the order executes on THIS connected trader's
+    // account. Re-reading matters: if the DEX rotated the key since last time,
+    // authorize sees a fingerprint mismatch and re-adopts rather than letting
+    // the executor sign with a stale key. With no wallet available (local/demo
+    // harness) we fall back to the static key.
     const withSession = async () => {
       if (!hasWallet) return undefined;
-      setStatus("Sign to enable TWAP…");
-      return await authorize(brokerId!, address!, chainId!, walletProvider);
+      const orderlyKey = keyStore.getOrderlyKey(address);
+      if (!orderlyKey) {
+        // isTradingEnabled should make this unreachable; if storage was
+        // cleared underneath us, say what actually fixes it.
+        throw new Error("No Orderly trading key found — enable trading first");
+      }
+      setStatus("Enabling TWAP…");
+      return await authorize(
+        brokerId!,
+        address!,
+        chainId!,
+        orderlyKey,
+        keyStore.getAccountId(address!) ?? undefined,
+      );
     };
 
     // Place, waiting out the one rejection that resolves itself. A trader who

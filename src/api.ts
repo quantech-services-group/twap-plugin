@@ -9,18 +9,23 @@
  * the private half. So nothing secret is ever transmitted: intercepting a
  * request yields a signature over that one call at that one instant.
  *
- * Two things this replaced, and why:
+ * Three things this replaced, and why:
  *
  * - A **SIWE sign-in**, which asked the trader for a second wallet signature to
- *   establish what the delegation establishes anyway (Orderly rejects an
- *   `AddOrderlyKey` that did not come from the wallet). One prompt now, and it
- *   is the one that describes what they are actually agreeing to.
+ *   establish what the delegation establishes anyway.
  * - A **bearer token**, which was one secret sent on every request and therefore
  *   worth stealing once. A signature is worth stealing for thirty seconds, for
  *   one request that has already happened.
- *
- * The trader's own Orderly key never leaves the browser either. We do not
- * receive a credential; we ask Orderly to issue one to us.
+ * - An **`AddOrderlyKey` wallet prompt** of our own. The DEX's "Enable Trading"
+ *   flow already delegated an Orderly trading key to this browser; asking the
+ *   wallet to sign a second delegation for our executor was one more prompt
+ *   proving a fact already proven. Onboarding now *adopts* that existing key:
+ *   the plugin reads it from the SDK's keyStore and hands it to the backend
+ *   once, over TLS, where it is encrypted at rest and used server-side — a TWAP
+ *   must keep working after the tab closes, so the signer cannot live here. The
+ *   backend accepts it only after Orderly confirms the key is a live trading
+ *   key of this exact account, which is what stops anyone from onboarding an
+ *   account whose key they do not hold.
  *
  * (A static `X-API-Key` fallback via `globalThis` remains for local harnesses
  * with no wallet.)
@@ -88,14 +93,38 @@ export interface Session {
    * the right signing key is found again (`getOrCreateKey`).
    */
   chain_id: number;
-  /** When the delegation lapses and the trader must sign again. */
+  /** When the delegation lapses and the trader must re-enable trading. */
   expires_at: number;
+  /**
+   * Fingerprint (short SHA-256) of the Orderly key secret this session was
+   * built by adopting — NOT the secret, and not derivable back into it.
+   *
+   * It exists to make rotation detectable: if the DEX re-creates its Orderly
+   * key (trader re-ran "Enable Trading", cleared storage, key expired), the
+   * backend is still holding the old one and every order it signs will be
+   * rejected. `authorize` compares the SDK's current key against this and
+   * re-adopts on mismatch instead of returning the stale session. A session
+   * from before this field existed never matches, which safely forces one
+   * re-adopt (no prompt — adoption is silent).
+   */
+  key_fp?: string;
 }
 
 /**
- * Minimal EIP-1193 provider. The caller passes the provider of the wallet the
- * trader actually connected (from the Orderly wallet connector), so every
- * supported wallet works — not just an injected browser extension.
+ * The slice of the SDK's `OrderlyKeyPair` that adoption needs. `secretKey` is
+ * base58 of the 32-byte ed25519 seed, stored by the SDK either bare or with an
+ * `ed25519:` prefix — both are in the wild and both are accepted.
+ */
+export interface OrderlyKeyPairLike {
+  secretKey: string;
+}
+
+/**
+ * Minimal EIP-1193 provider.
+ *
+ * @deprecated No longer used by `authorize` — onboarding adopts the DEX's
+ * existing Orderly key instead of asking the wallet to sign a new delegation.
+ * The type is kept so imports of it do not break.
  */
 export interface WalletProvider {
   request(args: { method: string; params?: unknown[] }): Promise<any>;
@@ -209,8 +238,8 @@ function forgetSession(): void {
 
 /**
  * The current session, if one is still valid. Unlike `authorize` this never
- * asks the wallet to sign — use it for read-only calls, which must not pop a
- * signature request.
+ * touches the network or the SDK keyStore — use it for read-only calls, which
+ * must work with whatever is already established.
  */
 export function peekSession(
   brokerId: string,
@@ -226,36 +255,55 @@ export function peekSession(
   return stored;
 }
 
-/** Sign EIP-712 typed data with the connected wallet (eth_signTypedData_v4). */
-async function signTypedDataV4(
-  provider: WalletProvider,
-  address: string,
-  typedData: unknown,
-): Promise<string> {
-  return await provider.request({
-    method: "eth_signTypedData_v4",
-    params: [address, JSON.stringify(typedData)],
-  });
+/**
+ * Short fingerprint of an Orderly key secret: first 8 bytes of its SHA-256,
+ * hex. Enough to detect "a different key than last time" — its only job — and
+ * one-way, so storing it in `localStorage` alongside the session leaks nothing
+ * about the secret it fingerprints.
+ */
+async function fingerprintSecret(normalizedSecret: string): Promise<string> {
+  const subtle = (globalThis as any).crypto?.subtle as SubtleCrypto | undefined;
+  if (!subtle) {
+    throw new Error("Web Crypto unavailable — TWAP needs an https:// page");
+  }
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(normalizedSecret));
+  return Array.from(new Uint8Array(digest).slice(0, 8))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** The SDK stores the secret bare or `ed25519:`-prefixed; compare and send one form. */
+function normalizeOrderlySecret(secret: string): string {
+  const s = secret.trim();
+  return s.startsWith("ed25519:") ? s.slice("ed25519:".length) : s;
 }
 
 /**
  * Authorize TWAP for `address` under `brokerId`, reusing a stored
  * authorization when there is one.
  *
- * On first use this prompts one `eth_signTypedData_v4`: an `AddOrderlyKey`
- * delegating a `read,trading` key to the executor. That is the only signature —
- * it is what lets the executor keep working a TWAP after the tab closes, and,
- * because Orderly validates it against the wallet, it is also what tells the
- * server that this browser's signing key belongs to this trader.
+ * No wallet prompt, ever: instead of asking the trader to sign a second
+ * `AddOrderlyKey`, this adopts the Orderly trading key the DEX's own "Enable
+ * Trading" flow already delegated. `orderlyKey` is that key, read from the
+ * SDK's keyStore by the caller (a React hook, so it cannot be reached from
+ * here). Its secret goes to the backend exactly once, over TLS; the backend
+ * verifies with Orderly that it is a live trading key of this very account —
+ * possession of it is what proves the caller may act for the account — then
+ * stores it encrypted so the executor can keep signing after the tab closes.
  *
- * The signing key is generated *before* `prepare` and its public half sent
- * along, so the two facts are established together. The server holds it aside
- * until Orderly confirms the wallet signature and only then binds it — sending
- * a public key is not a claim anyone has to believe on its own.
+ * The browser's own request-signing key (`getOrCreateKey`, P-256) is unchanged
+ * and still authenticates every later call; its public half rides along and is
+ * bound to the account when the adopt clears.
  *
- * A brand-new wallet with no Orderly account signs a `Registration` too; Orderly
- * requires it before it will accept any key, so the trader can go from a fresh
- * wallet to trading without leaving the panel.
+ * A cached session is reused only while it was built from the *same* Orderly
+ * key: the caller re-reads the SDK key on every call, and if the DEX rotated
+ * it (re-enabled trading, cleared storage) the fingerprint no longer matches
+ * and we silently re-adopt rather than let the executor keep signing with a
+ * key Orderly may be about to stop honouring.
+ *
+ * `expectedAccountId` is the SDK's own idea of the account (when the caller
+ * has it): a pure client-side sanity check that the wallet/broker pair we
+ * derived server-side is the account the DEX session believes it is in.
  *
  * The executor hot-onboards the account within ~60s of this returning.
  */
@@ -263,53 +311,47 @@ export async function authorize(
   brokerId: string,
   address: string,
   chain_id: number,
-  provider: WalletProvider,
+  orderlyKey: OrderlyKeyPairLike,
+  expectedAccountId?: string,
 ): Promise<Session> {
   const key = sessionKey(brokerId, address, chain_id);
+  const secret = normalizeOrderlySecret(orderlyKey?.secretKey ?? "");
+  if (!secret) {
+    // No key in the SDK store: "Enable Trading" has not run (or its storage
+    // was cleared). Nothing to adopt — and nothing to prove possession with.
+    throw new Error("No Orderly trading key found — enable trading on the exchange first");
+  }
+  const fp = await fingerprintSecret(secret);
+
   const cached = peekSession(brokerId, address, chain_id);
-  if (cached) return cached;
+  if (cached && cached.key_fp === fp) return cached;
 
-  const base = twapServerUrl();
-  const json = { "Content-Type": "application/json" };
   const requestKey = await getOrCreateKey(brokerId, address, chain_id);
-
-  const prep = await fetch(`${base}/execution/v1/onboard/prepare`, {
+  const res = await fetch(`${twapServerUrl()}/execution/v1/onboard/adopt`, {
     method: "POST",
-    headers: json,
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       wallet_address: address,
       broker_id: brokerId,
       chain_id,
       client_public_key: requestKey.publicKey,
+      orderly_key: secret,
     }),
   });
-  if (!prep.ok) throw new Error(`onboard/prepare ${prep.status}: ${await prep.text()}`);
-  const { typed_data, registration_typed_data } = (await prep.json()) as {
-    typed_data: unknown;
-    registration_typed_data?: unknown;
-  };
-
-  let registration_signature: string | undefined;
-  if (registration_typed_data) {
-    registration_signature = await signTypedDataV4(provider, address, registration_typed_data);
-  }
-  const signature = await signTypedDataV4(provider, address, typed_data);
-
-  const comp = await fetch(`${base}/execution/v1/onboard/complete`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({
-      wallet_address: address,
-      broker_id: brokerId,
-      signature,
-      registration_signature,
-    }),
-  });
-  if (!comp.ok) throw new Error(`onboard/complete ${comp.status}: ${await comp.text()}`);
-  const { account_id, expiration_ms } = (await comp.json()) as {
+  if (!res.ok) throw new Error(`onboard/adopt ${res.status}: ${await res.text()}`);
+  const { account_id, expiration_ms } = (await res.json()) as {
     account_id: string;
     expiration_ms: number;
   };
+
+  if (expectedAccountId && account_id.toLowerCase() !== expectedAccountId.toLowerCase()) {
+    // The server derives the account from (wallet, broker); the SDK knows the
+    // account its session actually trades. Disagreement means the ticket
+    // would target a different account than the one on screen — refuse.
+    throw new Error(
+      `Account mismatch: exchange session is ${expectedAccountId}, TWAP resolved ${account_id}`,
+    );
+  }
 
   const session: Session = {
     account_id,
@@ -317,6 +359,7 @@ export async function authorize(
     address,
     chain_id,
     expires_at: expiration_ms,
+    key_fp: fp,
   };
   rememberSession(key, session);
   return session;
@@ -446,7 +489,7 @@ export class NotSignedInError extends Error {
  * alive") — the account's execution context is not provisioned right now.
  *
  * For a trader who just onboarded this is the NORMAL case, not a failure: the
- * executor discovers a new account moments after `onboard/complete` returns
+ * executor discovers a new account moments after onboarding returns
  * (see `authorize`), and the first order often races that discovery. Two
  * traders hit exactly this on 2026-08-11; one was told "executor is not
  * alive", concluded the product was down, and never placed again.

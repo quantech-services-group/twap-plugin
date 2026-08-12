@@ -18,7 +18,7 @@
  * strategies land beside it later and the layout should not have to change.
  */
 import * as React from "react";
-import { useAccount, useConfig, useWalletConnector } from "@orderly.network/hooks";
+import { useAccount, useConfig, useKeyStore, useWalletConnector } from "@orderly.network/hooks";
 import { DataTable, type Column } from "@orderly.network/ui";
 
 import {
@@ -115,7 +115,8 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   const { state } = useAccount();
   const brokerId = useConfig<string>("brokerId");
   const address = state?.address;
-  const { wallet, connectedChain } = useWalletConnector();
+  const keyStore = useKeyStore();
+  const { connectedChain } = useWalletConnector();
 
   // Read-only: an existing session only. Looking at your own orders must never
   // pop a wallet signature — signing in is an explicit button below.
@@ -163,7 +164,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
     setError("");
     setBusy(true);
     try {
-      const provider = wallet?.provider as any;
+      const orderlyKey = address ? keyStore.getOrderlyKey(address) : null;
       // Name what is actually missing. "Connect your wallet and enable trading
       // first" was true but useless when the wallet *was* connected and it was
       // the chain id that came back empty -- it sent people to re-do a step
@@ -171,13 +172,21 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       const missing = [
         !address && "wallet address",
         !brokerId && "broker id",
-        !provider && "wallet provider",
         !chainId && "chain id",
+        !orderlyKey && "orderly trading key (enable trading on the exchange)",
       ].filter(Boolean);
       if (missing.length) {
         throw new Error(`Not available yet: ${missing.join(", ")}. Connect your wallet and enable trading first.`);
       }
-      setSession(await authorize(brokerId!, address!, chainId!, provider));
+      setSession(
+        await authorize(
+          brokerId!,
+          address!,
+          chainId!,
+          orderlyKey!,
+          keyStore.getAccountId(address!) ?? undefined,
+        ),
+      );
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -358,9 +367,10 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       </div>
 
       {needsSignIn ? (
-        // The button prompts an AddOrderlyKey delegation, so it has to say so.
-        // Labelled "Sign in" it promised a login and produced a request to
-        // delegate a trading key -- a bigger thing than the word implied.
+        // No wallet prompt behind this button anymore: it adopts the trading
+        // key the exchange's own "Enable Trading" already delegated. It stays a
+        // button (not automatic) because it shares this account's execution
+        // authority with the TWAP backend, and that should be a choice.
         <div className="oui-flex oui-flex-col oui-items-center oui-gap-2 oui-px-3 oui-py-8">
           <span className="oui-text-base-contrast-36">
             Enable TWAP to place and track orders on your account.
@@ -370,7 +380,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
             onClick={enableTwap}
             disabled={busy}
           >
-            {busy ? "Waiting for your wallet…" : "Enable TWAP"}
+            {busy ? "Enabling TWAP…" : "Enable TWAP"}
           </button>
           {/* The error belongs here, not only next to the table. It used to
               render under `error && rows`, and `rows` is null in this state --
