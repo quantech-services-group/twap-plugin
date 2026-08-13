@@ -190,7 +190,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       symbol: orderlySymbol,
       target_position,
       time_constraint_ms: timeoutMs,
-      strategy, // MAKER (rest at the touch) / TWAP (sliced IOC) — see api.Strategy
+      strategy, // MAKER (rest at the touch) / TAKER (sliced IOC) — see api.Strategy
     };
     const hasWallet = !!(address && brokerId && chainId);
 
@@ -392,7 +392,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
         <span className="oui-text-xs">Strategy</span>
         <div className="oui-grid oui-grid-cols-2 oui-gap-2">
           <button className={btn(strategy === "MAKER")} onClick={() => setStrategy("MAKER")}>Maker</button>
-          <button className={btn(strategy === "TWAP")} onClick={() => setStrategy("TWAP")}>TWAP</button>
+          <button className={btn(strategy === "TAKER")} onClick={() => setStrategy("TAKER")}>Taker</button>
         </div>
       </div>
 

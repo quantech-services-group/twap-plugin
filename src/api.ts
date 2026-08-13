@@ -68,13 +68,15 @@ function twapServerUrl(): string {
 }
 
 /**
- * Execution style for a ticket. "MAKER" rests PostOnly clips at the L1 touch
- * (maker fees, with a taker sweep near the deadline so the window still
- * holds); "TWAP" is the sliced-IOC default the engine has always run. The
- * server maps these to concrete executor strategies (maker_l1 / signal_twap);
- * it also still accepts "TAKER", the name this option had before 1.2.0.
+ * Execution style for a ticket — the trader's two choices, named by fee side
+ * because the whole panel is already a TWAP: a "TWAP" option inside it only
+ * confused people. "MAKER" rests PostOnly clips at the L1 touch (maker fees,
+ * with a taker sweep near the deadline so the window still holds); "TAKER"
+ * crosses the spread as sliced IOC. The server maps these to executor
+ * strategies (maker_l1 / signal_twap); it also still accepts "TWAP", the name
+ * this option carried in 1.2.0–1.4.0.
  */
-export type Strategy = "MAKER" | "TWAP";
+export type Strategy = "MAKER" | "TAKER";
 
 /**
  * An onboarded account. Carries no secret — the signing key stays in IndexedDB
