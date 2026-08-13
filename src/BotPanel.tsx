@@ -26,6 +26,7 @@ import {
   authorize,
   peekSession,
   queryTickets,
+  shortTicketId,
   NotSignedInError,
   type Session,
   type TicketProgress,
@@ -100,7 +101,7 @@ function TicketId({ id }: { id: string }) {
         );
       }}
     >
-      {copied ? "copied" : `${id.slice(0, 10)}…${id.slice(-4)}`}
+      {copied ? "copied" : shortTicketId(id)}
     </button>
   );
 }

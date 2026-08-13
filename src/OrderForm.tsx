@@ -28,6 +28,7 @@ import {
   placeTicket,
   authorize,
   waitForExecutorReady,
+  shortTicketId,
   type Session,
   type Strategy,
 } from "./api.js";
@@ -244,7 +245,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       try {
         const res = await placeWhenReady(session);
         // Name the ticket so the trader can find this exact order in the Bot tab.
-        setStatus(`Placed ${res.ticket_id.slice(0, 10)}… — see the Bot tab`);
+        setStatus(`Placed ${shortTicketId(res.ticket_id)}`);
       } catch (e: any) {
         // The credential was rejected — it has already been dropped, so a second
         // attempt authorizes afresh. Worth one retry rather than a dead end: the
@@ -254,7 +255,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
         session = await withSession();
         setStatus("Placing…");
         const res = await placeWhenReady(session);
-        setStatus(`Placed ${res.ticket_id.slice(0, 10)}… — see the Bot tab`);
+        setStatus(`Placed ${shortTicketId(res.ticket_id)}`);
       }
     } catch (e: any) {
       setStatus(

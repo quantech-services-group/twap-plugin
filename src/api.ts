@@ -431,6 +431,13 @@ export interface TicketProgress {
   is_expired?: boolean;
 }
 
+/**
+ * Ticket id shortened for display — first 10 and last 4, the form used both in
+ * the Bot tab's ID column and the "Placed …" confirmation, so the two never
+ * disagree about how an id looks.
+ */
+export const shortTicketId = (id: string): string => `${id.slice(0, 10)}…${id.slice(-4)}`;
+
 const TICKETS = "/execution/v1/tickets";
 
 /** Fetch one ticket so the panel can show how far execution has got. */
