@@ -209,6 +209,28 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       setStatus("Enter a quantity in the order form above");
       return;
     }
+    // Timeout must be a real TWAP window: at least a minute (below that there is
+    // nothing to slice), at most a week.
+    const MIN_TIMEOUT_MS = 60_000; // 1 minute
+    const MAX_TIMEOUT_MS = 168 * 60 * 60_000; // 168 hours (7 days)
+    if (timeoutMs < MIN_TIMEOUT_MS || timeoutMs > MAX_TIMEOUT_MS) {
+      setStatus("Timeout must be between 1 minute and 168 hours");
+      return;
+    }
+    // Notional gate — mirrors the executor. An order that OPENS or increases the
+    // position must clear the exchange's minimum notional, or every slice falls
+    // below the minimum, gets rejected, and the ticket sits doing nothing until
+    // it expires. A REDUCE (trading against the current position) is exempt: you
+    // can always close a position, however small the remainder.
+    const tradeDir = side === "BUY" ? 1 : -1;
+    const isReduce = currentPosition !== 0 && Math.sign(currentPosition) !== tradeDir;
+    const minNotional = Number(symbolInfo?.("min_notional", 0)) || 0;
+    if (!isReduce && minNotional > 0 && markPrice > 0 && size * markPrice < minNotional) {
+      setStatus(
+        `Order size must be at least ${minNotional} ${quote} (min notional), or reduce your position`,
+      );
+      return;
+    }
     // Ticket target is ABSOLUTE (executor computes the delta to trade).
     const target_position = currentPosition + (side === "BUY" ? size : -size);
     const ticket = {
