@@ -111,20 +111,47 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   const symbolInfo = useSymbolInfo(orderlySymbol);
   const baseDp: number = (symbolInfo?.("base_dp", 4) as number | undefined) ?? 4;
 
-  // Order size can be entered either as a quantity or as notional; the mark
-  // price converts between them and the quantity remains the single source of
-  // truth (it is what the host's store and our ticket both use).
+  // Qty (base) and order size (notional) are both editable and each converts to
+  // the other using the mark price AT THE MOMENT OF ENTRY. Quantity stays the
+  // single source of truth (the host store and our ticket use it); the notional
+  // is local state so a ticking mark price never rewrites the figure the trader
+  // just typed or is reading.
   const markPrice = useMarkPriceBySymbol(orderlySymbol);
+  const [notional, setNotionalState] = React.useState("");
+  // The quantity that the order-size box last produced. While the live quantity
+  // still equals it, the effect below leaves the typed order size untouched —
+  // otherwise a coarse tick (e.g. ADA trades in whole units) would snap "$1"
+  // back to the value of the rounded quantity ("$0.92") the instant it is typed.
+  const notionalDrivenQty = React.useRef<string | null>(null);
+
   const setQuantity = (value: string) =>
     actions?.updateOrderByKey?.("order_quantity", value);
-  const notional =
-    Number(qty) > 0 && markPrice > 0 ? String(Number((Number(qty) * markPrice).toFixed(2))) : "";
   const setNotional = (value: string) => {
+    setNotionalState(value);
+    if (!value) {
+      notionalDrivenQty.current = "";
+      return setQuantity("");
+    }
     const usd = Number(value);
-    if (!value) return setQuantity("");
     if (!Number.isFinite(usd) || markPrice <= 0) return;
-    setQuantity(String(Number((usd / markPrice).toFixed(baseDp))));
+    const nextQty = String(Number((usd / markPrice).toFixed(baseDp)));
+    notionalDrivenQty.current = nextQty;
+    setQuantity(nextQty);
   };
+
+  // Recompute the order size only when the QUANTITY changes for another reason —
+  // typed in the Qty box, or the host slider / max button. Keyed on qty (not
+  // markPrice) so a ticking price never moves it, and skipped when the quantity
+  // is the one the order-size box just produced so the typed figure is kept.
+  React.useEffect(() => {
+    if (qty === notionalDrivenQty.current) return;
+    if (!(Number(qty) > 0) || !(markPrice > 0)) {
+      if (!qty) setNotionalState("");
+      return;
+    }
+    setNotionalState(String(Number((Number(qty) * markPrice).toFixed(2))));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qty]);
 
   // Timeout is entered as hours + minutes; the ticket carries milliseconds.
   const hours = String(Math.floor(timeoutMs / 3_600_000) || 0);
