@@ -21,8 +21,10 @@ import {
   useOrderStore,
   useSymbolInfo,
   useMarkPriceBySymbol,
+  useMarginModeBySymbol,
+  useOrderbookStream,
 } from "@orderly.network/hooks";
-import { AccountStatusEnum } from "@orderly.network/types";
+import { AccountStatusEnum, MarginMode } from "@orderly.network/types";
 
 import {
   placeTicket,
@@ -61,22 +63,24 @@ function splitSymbol(sym?: string): { base: string; quote: string } {
 }
 
 /**
- * Whether the execution engine can trade this market.
+ * Symbol-shape check for whether the engine can trade this market — the
+ * load-time fallback for the authoritative `broker_id` field (see the caller).
  *
  * Orderly symbols come in two shapes. An official listing is `PERP_<BASE>_USDC`
  * (three segments). A symbol with a fourth segment — `PERP_CTEST_USDC_alpix` —
- * is NOT an official Orderly listing; the suffix is who requested the listing,
- * not who it belongs to. Per Orderly (2026-08-11): every DEX can trade these,
- * they are not broker-exclusive — the one thing that sets them apart is that
- * they trade in **isolated-margin mode only**.
+ * is a permissionless / community listing (the suffix is the broker_id of
+ * whoever listed it). Per Orderly (2026-08-11): every DEX can trade these, they
+ * are not broker-exclusive — the one thing that sets them apart is that they
+ * trade in **isolated-margin mode only**.
  *
  * We do not support them, and isolated-margin-only is the reason: the engine
  * trades cross-margin, and it also cannot round-trip the fourth segment (its
  * `Symbol` type is base+quote, so the order would go back out as
  * `PERP_CTEST_USDC` — a market that does not exist).
  *
- * Checked here rather than left to fail later: placing the ticket would
- * otherwise succeed and then sit at OPEN until its deadline, doing nothing.
+ * The caller prefers the instrument's `broker_id` (`!= null` ⇔ permissionless)
+ * once instrument info has loaded; this segment count only guards the window
+ * before it arrives, so a 4-segment market never flashes a usable form.
  */
 function isSupportedMarket(symbol: string): boolean {
   const parts = symbol.split("_");
@@ -86,9 +90,25 @@ function isSupportedMarket(symbol: string): boolean {
 export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) {
   const { base, quote } = splitSymbol(symbol);
 
-  const [timeoutMs, setTimeoutMs] = React.useState<number>(TIMEOUT_PRESETS[1].ms);
-  const [strategy, setStrategy] = React.useState<Strategy>("MAKER");
+  // Duration starts empty (PRD §3.1: Timeout hr/min default 0) — the submit
+  // button is disabled until a real window is set, and it resets back here.
+  const [timeoutMs, setTimeoutMs] = React.useState<number>(0);
+  // Default Taker (PRD v1.2 §3.5): most traders want the fill, and Taker fills
+  // faster at the cost of price — the safer default for a one-shot TWAP.
+  const [strategy, setStrategy] = React.useState<Strategy>("TAKER");
+  // `status` is the B-line: an interim/error note under the button. `success`
+  // is the B10 two-line confirmation, shown for 30s after a place (PRD §3.6-7).
+  // `submitting` drives the A4 button state ("Placing order...", disabled).
   const [status, setStatus] = React.useState<string>("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [success, setSuccess] = React.useState<{ ticketId: string } | null>(null);
+  const successTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (successTimer.current) clearTimeout(successTimer.current);
+    },
+    [],
+  );
 
   // Buy/Sell is owned here rather than read back from the host's switch: the
   // submit button states the direction, and it must never be able to disagree
@@ -103,7 +123,6 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
 
   // Orderly-native symbol for this market (e.g. "PERP_ETH_USDC").
   const orderlySymbol = symbol ?? `PERP_${base}_${quote}`;
-  const supported = isSupportedMarket(orderlySymbol);
 
   // Display precision for this market: the exchange's own base decimal places
   // (base_tick 0.0001 -> 4 dp for ETH), so sizes are not shown to a made-up
@@ -111,12 +130,49 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   const symbolInfo = useSymbolInfo(orderlySymbol);
   const baseDp: number = (symbolInfo?.("base_dp", 4) as number | undefined) ?? 4;
 
+  // A permissionless / community listing trades isolated-margin only. The engine
+  // DOES handle these now (it tags the order ISOLATED and round-trips the
+  // symbol's 4th segment), but only if the trader has put THIS market into
+  // isolated margin on their own account — otherwise every slice fails
+  // InsufficientMargin and the executor cancels the ticket. So the gate is the
+  // account's per-symbol margin mode, not the market itself: `marginMode` is the
+  // account setting, `isPermissionlessListing` is Orderly's own flag for the
+  // market. The 4-segment symbol shape is the immediate signal before the hook
+  // resolves, so the isolated-setup prompt never flashes a usable form first.
+  const { marginMode, isPermissionlessListing } =
+    useMarginModeBySymbol(orderlySymbol);
+  const permissionless =
+    isPermissionlessListing || !isSupportedMarket(orderlySymbol);
+  const needsIsolatedSetup =
+    permissionless && marginMode !== MarginMode.ISOLATED;
+
   // Qty (base) and order size (notional) are both editable and each converts to
   // the other using the mark price AT THE MOMENT OF ENTRY. Quantity stays the
   // single source of truth (the host store and our ticket use it); the notional
   // is local state so a ticking mark price never rewrites the figure the trader
   // just typed or is reading.
+  // Conversion basis is the book mid — (best bid + best ask) / 2 — per PRD
+  // §2/§3.3. It is a preview figure only (the execution price is set per slice by
+  // the engine), so mark price is a fine fallback while the orderbook is still
+  // loading or a thin market has an empty side. Best levels are found by min/max
+  // rather than asks[0]/bids[0] so the result does not depend on the stream's
+  // sort order, and zero-price padding levels are skipped.
   const markPrice = useMarkPriceBySymbol(orderlySymbol);
+  const [orderbook] = useOrderbookStream(orderlySymbol);
+  const midPrice = React.useMemo(() => {
+    let bestAsk = Infinity;
+    let bestBid = 0;
+    for (const a of orderbook?.asks ?? []) {
+      const p = a?.[0];
+      if (typeof p === "number" && p > 0 && p < bestAsk) bestAsk = p;
+    }
+    for (const b of orderbook?.bids ?? []) {
+      const p = b?.[0];
+      if (typeof p === "number" && p > 0 && p > bestBid) bestBid = p;
+    }
+    return bestAsk < Infinity && bestBid > 0 ? (bestAsk + bestBid) / 2 : 0;
+  }, [orderbook]);
+  const price = midPrice > 0 ? midPrice : markPrice;
   const [notional, setNotionalState] = React.useState("");
   // The quantity that the order-size box last produced. While the live quantity
   // still equals it, the effect below leaves the typed order size untouched —
@@ -133,8 +189,8 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       return setQuantity("");
     }
     const usd = Number(value);
-    if (!Number.isFinite(usd) || markPrice <= 0) return;
-    const nextQty = String(Number((usd / markPrice).toFixed(baseDp)));
+    if (!Number.isFinite(usd) || price <= 0) return;
+    const nextQty = String(Number((usd / price).toFixed(baseDp)));
     notionalDrivenQty.current = nextQty;
     setQuantity(nextQty);
   };
@@ -145,11 +201,11 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   // is the one the order-size box just produced so the typed figure is kept.
   React.useEffect(() => {
     if (qty === notionalDrivenQty.current) return;
-    if (!(Number(qty) > 0) || !(markPrice > 0)) {
+    if (!(Number(qty) > 0) || !(price > 0)) {
       if (!qty) setNotionalState("");
       return;
     }
-    setNotionalState(String(Number((Number(qty) * markPrice).toFixed(2))));
+    setNotionalState(String(Number((Number(qty) * price).toFixed(2))));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qty]);
 
@@ -157,8 +213,11 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   const hours = String(Math.floor(timeoutMs / 3_600_000) || 0);
   const minutes = String(Math.floor((timeoutMs % 3_600_000) / 60_000) || 0);
   const setDuration = (h: string, m: string) => {
-    const ms = (Number(h) || 0) * 3_600_000 + (Number(m) || 0) * 60_000;
-    setTimeoutMs(ms);
+    // Hours cap at 168 (PRD §3.4 / C1); minutes ≥60 carry into hours naturally
+    // because hours/minutes are re-derived from the stored ms.
+    const clampedH = Math.min(Number(h) || 0, 168);
+    const ms = clampedH * 3_600_000 + (Number(m) || 0) * 60_000;
+    setTimeoutMs(Math.min(ms, 168 * 3_600_000));
   };
 
   // Live account state from the Orderly SDK (the panel is rendered inside
@@ -188,11 +247,34 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   const { connectedChain } = useWalletConnector();
   const chainId = connectedChain?.id ? Number(connectedChain.id) : undefined;
 
-  // Only allow submitting once the trader has completed Orderly's own login
-  // ("Enable Trading"). Before that there is no account context: balances and
-  // positions read 0, so a ticket would target a position we cannot see. It is
-  // also what guarantees the keyStore holds a trading key for us to adopt.
-  const isTradingEnabled = state?.status === AccountStatusEnum.EnableTrading;
+  // "Can place" = the trader has enabled trading (delegated an Orderly key).
+  // Gate on that, NOT on `status === EnableTrading` alone — which is the bug
+  // behind the client report (2026-08-14): after a reload the Orderly key is
+  // restored from storage but the wallet is not reconnected yet, so the account
+  // sits at EnableTradingWithoutConnected (-1). Orders are signed with the
+  // delegated key, not the wallet, so trading DOES work in that state (it is why
+  // the host's own order forms accept it) — but `=== EnableTrading (5)` excluded
+  // it and left the TWAP button stuck "Connect wallet to trade". Accept the key
+  // itself and both enabled-trading statuses.
+  const hasOrderlyKey = !!(address && keyStore.getOrderlyKey(address));
+  const isTradingEnabled =
+    hasOrderlyKey ||
+    state?.status === AccountStatusEnum.EnableTrading ||
+    state?.status === AccountStatusEnum.EnableTradingWithoutConnected;
+
+  // TEMP diagnostic (1.6.3): the button was still disabled for a trader who had
+  // enabled trading on woofi.com. Log the gate inputs so it can be read from the
+  // console — status (is it -1?), whether an address and key are present. Remove
+  // once confirmed.
+  React.useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log("[twap] gate:", {
+      status: state?.status,
+      address,
+      hasOrderlyKey,
+      isTradingEnabled,
+    });
+  }, [state?.status, address, hasOrderlyKey, isTradingEnabled]);
 
   // Live progress is NOT tracked here. A placed ticket appears under Running in
   // the Bot tab, which follows every ticket on the account rather than only the
@@ -224,8 +306,33 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     // can always close a position, however small the remainder.
     const tradeDir = side === "BUY" ? 1 : -1;
     const isReduce = currentPosition !== 0 && Math.sign(currentPosition) !== tradeDir;
+    // Market-state gate: Orderly marks a market REDUCE_ONLY (e.g. a stock perp
+    // outside trading hours) or otherwise non-ACTIVE (POST_ONLY, DELISTING).
+    // Opening then is rejected slice-by-slice and the ticket sits idle — check
+    // the instrument's own `status` up front instead. Reducing a REDUCE_ONLY
+    // market is still allowed (that is what the state permits); any other
+    // non-ACTIVE status blocks the market entirely.
+    const marketStatus = String(symbolInfo?.("status", "ACTIVE") ?? "ACTIVE");
+    if (marketStatus === "REDUCE_ONLY" && !isReduce) {
+      setStatus(`${base}-PERP is in reduce-only mode — you can only reduce or close a position`);
+      return;
+    }
+    if (marketStatus !== "ACTIVE" && marketStatus !== "REDUCE_ONLY") {
+      setStatus(`${base}-PERP is not open for trading (status: ${marketStatus})`);
+      return;
+    }
+    // Pre-market (pre-TGE) gate: `is_pretge` marks a listing whose token has not
+    // had its generation event yet. Treat it like reduce-only — do not open new
+    // TWAP exposure on a pre-market instrument, but still allow winding an
+    // existing position down. (Most pre-TGE listings are also permissionless and
+    // are already blocked above; this catches an official one.)
+    const isPretge = Boolean(symbolInfo?.("is_pretge", false));
+    if (isPretge && !isReduce) {
+      setStatus(`${base}-PERP is a pre-market (pre-TGE) listing — you can only reduce or close a position`);
+      return;
+    }
     const minNotional = Number(symbolInfo?.("min_notional", 0)) || 0;
-    if (!isReduce && minNotional > 0 && markPrice > 0 && size * markPrice < minNotional) {
+    if (!isReduce && minNotional > 0 && price > 0 && size * price < minNotional) {
       setStatus(
         `Order size must be at least ${minNotional} ${quote} (min notional), or reduce your position`,
       );
@@ -288,13 +395,34 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       }
     };
 
+    // On a successful place: show the B10 two-line confirmation for 30s, empty
+    // the form back to its initial state (each TWAP is independent — last one's
+    // size/duration must not carry over), reset Side/Strategy to their defaults,
+    // and bring the Bot → TWAP tab forward. (§3.6-6/7/8, §3.7.2 B10.)
+    const onPlaced = (ticketId: string) => {
+      setStatus("");
+      setSuccess({ ticketId });
+      if (successTimer.current) clearTimeout(successTimer.current);
+      successTimer.current = setTimeout(() => setSuccess(null), 30_000);
+      setQuantity("");
+      setNotional("");
+      setTimeoutMs(0);
+      setSide("BUY");
+      setStrategy("TAKER");
+    };
+
+    // A4: the button reads "Placing order..." and is disabled for the duration,
+    // so a second click cannot place a duplicate. Any prior success clears — a
+    // new submit replaces the old confirmation (§3.7.2 rules).
+    setSuccess(null);
+    if (successTimer.current) clearTimeout(successTimer.current);
+    setSubmitting(true);
     try {
       let session = await withSession();
       setStatus("Placing…");
       try {
         const res = await placeWhenReady(session);
-        // Name the ticket so the trader can find this exact order in the Bot tab.
-        setStatus(`Placed ${shortTicketId(res.ticket_id)}`);
+        onPlaced(res.ticket_id);
       } catch (e: any) {
         // The credential was rejected — it has already been dropped, so a second
         // attempt authorizes afresh. Worth one retry rather than a dead end: the
@@ -304,39 +432,36 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
         session = await withSession();
         setStatus("Placing…");
         const res = await placeWhenReady(session);
-        setStatus(`Placed ${shortTicketId(res.ticket_id)}`);
+        onPlaced(res.ticket_id);
       }
     } catch (e: any) {
       setStatus(
         e?.name === "NotSignedInError"
           ? "Failed: connect your wallet and enable trading, then try again"
-          : `Failed: ${e?.message ?? e}`,
+          : `Failed to place order: ${e?.message ?? e}. Please try again.`,
       );
+    } finally {
+      setSubmitting(false);
     }
   }
 
   const btn = (active: boolean) =>
     `oui-px-2 oui-py-1 oui-rounded oui-text-sm ${active ? "oui-bg-primary oui-text-white" : "oui-bg-base-6"}`;
 
-  // Say so instead of rendering a form that cannot work. The host DEX decides
-  // which market is on screen, so this panel appears on markets the engine
-  // cannot trade; letting someone fill the form in and submit would place a
-  // ticket that sits at OPEN until its deadline, doing nothing.
-  if (!supported) {
-    // Say the limit is this market, not the asset, and why — otherwise it
-    // reads as arbitrary (the same asset can have an official listing that
-    // works and a non-official one that does not). A fourth segment marks a
-    // non-official listing, which trades isolated-margin-only; the engine
-    // trades cross-margin, so it cannot work these.
+  // Say so instead of rendering a form that cannot work. A permissionless
+  // listing trades isolated-margin only; the engine can work it, but only once
+  // the trader has set THIS market to isolated margin on their account. Until
+  // then every slice would fail InsufficientMargin and the executor would cancel
+  // the ticket — so gate the form and tell them the one thing to do. The message
+  // clears itself once they switch (the margin-mode hook updates live).
+  if (needsIsolatedSetup) {
     return (
       <div className="oui-flex oui-flex-col oui-items-center oui-gap-1.5 oui-rounded-lg oui-bg-base-8 oui-p-4 oui-text-center oui-text-sm">
-        <span className="oui-text-base-contrast">TWAP is not available for {base}</span>
+        <span className="oui-text-base-contrast">Set {base}-PERP to isolated margin</span>
         <span className="oui-text-xs oui-text-base-contrast-36">
-          This market is not an official Orderly listing, so it trades in
-          isolated-margin mode only, which smart execution does not support.
-        </span>
-        <span className="oui-text-xs oui-text-base-contrast-36">
-          Use the exchange&apos;s own order types for {base}.
+          {base} is a permissionless listing, which trades in isolated-margin
+          mode only. Switch this market to isolated margin in your account
+          settings to run TWAP on it.
         </span>
       </div>
     );
@@ -439,42 +564,65 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
 
       {/* Strategy: Maker / Taker */}
       <div className="oui-flex oui-flex-col oui-gap-1">
-        <span className="oui-text-xs">Strategy</span>
+        <span className="oui-text-xs oui-flex oui-items-center oui-gap-1">
+          Strategy
+          <span
+            className="oui-inline-flex oui-h-3.5 oui-w-3.5 oui-items-center oui-justify-center oui-rounded-full oui-border oui-text-[10px] oui-text-base-contrast-54 oui-cursor-help"
+            title={
+              "Taker: Fills faster, but usually at a worse price than Maker.\n" +
+              "Maker: Better price, but fills more slowly."
+            }
+          >
+            ?
+          </span>
+        </span>
         <div className="oui-grid oui-grid-cols-2 oui-gap-2">
           <button className={btn(strategy === "MAKER")} onClick={() => setStrategy("MAKER")}>Maker</button>
           <button className={btn(strategy === "TAKER")} onClick={() => setStrategy("TAKER")}>Taker</button>
         </div>
       </div>
 
-      {/* Where this order leaves the position. The engine works to an absolute
-          target, so state it before the trader commits. */}
-      {Number(qty) > 0 && (
-        <div className="oui-flex oui-justify-between oui-text-xs oui-text-base-contrast-54">
-          <span>Position</span>
-          <span>
-            {formatQty(currentPosition, baseDp)} →{" "}
-            {formatQty(currentPosition + (side === "BUY" ? Number(qty) : -Number(qty)), baseDp)} {base}
-          </span>
-        </div>
-      )}
+      {/* No Position (0 → 100 ADA) row: PRD v1.2 §3.6-9 explicitly drops it from
+          the form — the engine targets an absolute position, but the trader
+          reasons in "how much to trade", and the before/after line was cut. */}
 
       <button
         className={`oui-mt-1 oui-py-2 oui-rounded oui-text-white ${
-          !isTradingEnabled
+          !isTradingEnabled || submitting
             ? "oui-bg-base-6 oui-cursor-not-allowed"
             : side === "BUY"
               ? "oui-bg-success"
               : "oui-bg-danger"
         }`}
         onClick={onSubmit}
-        disabled={!isTradingEnabled}
+        disabled={!isTradingEnabled || submitting}
       >
-        {isTradingEnabled
-          ? `${side === "BUY" ? "Buy / Long" : "Sell / Short"} ${base}`
-          : "Connect wallet to trade"}
+        {/* A4: while placing, the button reads "Placing order..." and is
+            disabled so a second click cannot place a duplicate. Otherwise it
+            keeps the direction text — greyed via the disabled styling — even
+            when not connected (A1: the wallet entry lives in the panel's own
+            Connect wallet, not in this button). */}
+        {submitting
+          ? "Placing order..."
+          : `${side === "BUY" ? "Buy / Long" : "Sell / Short"} ${base}`}
       </button>
 
-      {status && <div className="oui-text-xs oui-text-base-contrast-54">{status}</div>}
+      {/* B10: the two-line confirmation, shown for 30s (or until the next place)
+          — the ticket id, then where to watch it. It sits above the B-line so a
+          success is never hidden by an input-gate note that reappears once the
+          cleared form reads as "no quantity". */}
+      {success ? (
+        <div className="oui-flex oui-flex-col oui-text-xs">
+          <span className="oui-text-success">
+            Placed ticket {shortTicketId(success.ticketId)}
+          </span>
+          <span className="oui-text-base-contrast-54">
+            View execution details in Bot → TWAP
+          </span>
+        </div>
+      ) : (
+        status && <div className="oui-text-xs oui-text-base-contrast-54">{status}</div>
+      )}
     </div>
   );
 }

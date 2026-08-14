@@ -601,7 +601,17 @@ export async function queryTickets(session?: Session, limit = 50): Promise<Ticke
   }
   if (!res.ok) throw new Error(`queryAllTickets ${res.status}: ${await res.text()}`);
   const body = (await res.json()) as { tickets?: TicketProgress[] };
-  return (body.tickets ?? []).sort((a, b) => b.start_time_ms - a.start_time_ms);
+  // Dedupe by ticket_id: the server can return the same ticket twice (a stale
+  // copy alongside the live one), which shows as duplicate rows and a React
+  // duplicate-key warning in the table. Keep the freshest copy per id.
+  const byId = new Map<string, TicketProgress>();
+  for (const t of body.tickets ?? []) {
+    const prev = byId.get(t.ticket_id);
+    if (!prev || (t.last_update_time_ms ?? 0) >= (prev.last_update_time_ms ?? 0)) {
+      byId.set(t.ticket_id, t);
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.start_time_ms - a.start_time_ms);
 }
 
 export interface PlaceTicketParams {
