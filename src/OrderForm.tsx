@@ -26,7 +26,6 @@ import {
   useMaxQty,
 } from "@orderly.network/hooks";
 import { AccountStatusEnum, MarginMode, OrderSide } from "@orderly.network/types";
-import { Tooltip } from "@orderly.network/ui";
 
 import {
   placeTicket,
@@ -618,30 +617,11 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
         </div>
       </div>
 
-      {/* Strategy: Maker / Taker */}
-      <div className="oui-flex oui-flex-col oui-gap-1">
-        <span className="oui-text-xs oui-flex oui-items-center oui-gap-1">
-          Strategy
-          {/* SDK Tooltip — Radix, rendered through a portal, so it never affects
-              the form's layout (a hand-rolled absolutely-positioned tip did). */}
-          <Tooltip
-            content={
-              <div className="oui-max-w-[240px] oui-text-2xs oui-leading-snug">
-                <div>Taker: Fills faster, but usually at a worse price than Maker</div>
-                <div className="oui-mt-1">Maker: Better price, but fills more slowly</div>
-              </div>
-            }
-          >
-            <span className="oui-inline-flex oui-h-3.5 oui-w-3.5 oui-items-center oui-justify-center oui-rounded-full oui-border oui-text-[10px] oui-text-base-contrast-54 oui-cursor-help">
-              ?
-            </span>
-          </Tooltip>
-        </span>
-        <div className="oui-grid oui-grid-cols-2 oui-gap-2">
-          <button className={btn(strategy === "MAKER")} onClick={() => setStrategy("MAKER")}>Maker</button>
-          <button className={btn(strategy === "TAKER")} onClick={() => setStrategy("TAKER")}>Taker</button>
-        </div>
-      </div>
+      {/* Strategy selector hidden for now: every ticket runs Taker. The Maker
+          strategy does not yet pace across the ticket window (it fills as fast as
+          the touch is hit, finishing a multi-hour TWAP in minutes), so until that
+          lands the choice is removed and `strategy` stays "TAKER" (its default).
+          Restore this block once Maker is time-paced. */}
 
       {/* No Position (0 → 100 ADA) row: PRD v1.2 §3.6-9 explicitly drops it from
           the form — the engine targets an absolute position, but the trader
