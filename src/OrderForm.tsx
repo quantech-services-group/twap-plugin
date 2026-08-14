@@ -23,14 +23,17 @@ import {
   useMarkPriceBySymbol,
   useMarginModeBySymbol,
   useOrderbookStream,
+  useMaxQty,
 } from "@orderly.network/hooks";
-import { AccountStatusEnum, MarginMode } from "@orderly.network/types";
+import { AccountStatusEnum, MarginMode, OrderSide } from "@orderly.network/types";
 
 import {
   placeTicket,
   authorize,
   waitForExecutorReady,
   shortTicketId,
+  peekSession,
+  queryTickets,
   type Session,
   type Strategy,
 } from "./api.js";
@@ -262,19 +265,96 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     state?.status === AccountStatusEnum.EnableTrading ||
     state?.status === AccountStatusEnum.EnableTradingWithoutConnected;
 
-  // TEMP diagnostic (1.6.3): the button was still disabled for a trader who had
-  // enabled trading on woofi.com. Log the gate inputs so it can be read from the
-  // console — status (is it -1?), whether an address and key are present. Remove
-  // once confirmed.
+  // Max order quantity this account can afford for this market/side — the SDK
+  // computes it from collateral, leverage, IMR and the existing position, so we
+  // do not re-derive margin ourselves. Powers the B7 "Max quantity is …" line.
+  const maxQty = useMaxQty(
+    orderlySymbol,
+    side === "BUY" ? OrderSide.BUY : OrderSide.SELL,
+  );
+
+  // Count of the account's still-working TWAP tickets, for the B2 concurrency
+  // cap (20, across all pairs). Read-only peek at the existing session — never
+  // pops a signature — refreshed on a slow cadence since it changes rarely.
+  const [activeCount, setActiveCount] = React.useState(0);
   React.useEffect(() => {
-    // eslint-disable-next-line no-console
-    console.log("[twap] gate:", {
-      status: state?.status,
-      address,
-      hasOrderlyKey,
-      isTradingEnabled,
-    });
-  }, [state?.status, address, hasOrderlyKey, isTradingEnabled]);
+    const session =
+      address && brokerId && chainId ? peekSession(brokerId, address, chainId) : undefined;
+    if (!session) {
+      setActiveCount(0);
+      return;
+    }
+    let cancelled = false;
+    const TERMINAL = ["COMPLETE", "CANCEL", "EXPIRED"];
+    const load = () =>
+      queryTickets(session)
+        .then((ts) => {
+          if (!cancelled) setActiveCount(ts.filter((t) => !TERMINAL.includes(t.status)).length);
+        })
+        .catch(() => undefined);
+    load();
+    const id = setInterval(load, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [address, brokerId, chainId]);
+
+  // §3.7.2 region B — the single line under the button. Computed reactively from
+  // the current form state so it updates as the trader types, and priority-
+  // ordered (only the highest applicable shows). `blocking` also disables the
+  // submit button. B0 (not connected) shows nothing — the panel has its own
+  // Connect wallet. B6 (post-split single slice) is intentionally omitted: the
+  // executor owns per-slice min-notional, not the form. B9 (fail) / B10 (success)
+  // are event-driven and handled separately.
+  const gate = React.useMemo<{ text: string; tone: "red" | "grey"; blocking: boolean } | null>(() => {
+    if (!isTradingEnabled) return null; // B0
+    const size = Number(qty);
+    const tradeDir = side === "BUY" ? 1 : -1;
+    const isReduce = currentPosition !== 0 && Math.sign(currentPosition) !== tradeDir;
+    const marketStatus = String(symbolInfo?.("status", "ACTIVE") ?? "ACTIVE");
+    const isPretge = Boolean(symbolInfo?.("is_pretge", false));
+    const minNotional = Number(symbolInfo?.("min_notional", 0)) || 0;
+    const avail = freeCollateral ?? 0;
+
+    // B1 — market not open for the intended direction.
+    if (marketStatus === "REDUCE_ONLY" && !isReduce)
+      return { text: `${base}-PERP is in reduce-only mode — you can only reduce or close a position`, tone: "red", blocking: true };
+    if (marketStatus !== "ACTIVE" && marketStatus !== "REDUCE_ONLY")
+      return { text: "Trading is currently unavailable for this market", tone: "red", blocking: true };
+    if (isPretge && !isReduce)
+      return { text: `${base}-PERP is a pre-market (pre-TGE) listing — you can only reduce or close a position`, tone: "red", blocking: true };
+    // B2 — account-wide concurrency cap.
+    if (activeCount >= 20)
+      return { text: "You've reached the limit of 20 active TWAP orders. End an order to place a new one.", tone: "red", blocking: true };
+    // B3 — no quantity.
+    if (!Number.isFinite(size) || size <= 0)
+      return { text: "Enter a quantity in the order form above", tone: "grey", blocking: true };
+    // B4 — duration below the minimum.
+    if (timeoutMs < 60_000)
+      return { text: "Set a duration of at least 1 minute", tone: "grey", blocking: true };
+    // B5 — opening below the exchange minimum notional (reduce is exempt).
+    if (!isReduce && minNotional > 0 && price > 0 && size * price < minNotional)
+      return { text: `Minimum order size is ${minNotional} ${quote}`, tone: "red", blocking: true };
+    // B7 / B8 — balance (opening only; you can always reduce/close).
+    if (!isReduce) {
+      if (avail <= 0)
+        return { text: "Insufficient balance. Deposit funds to continue.", tone: "red", blocking: true };
+      if (maxQty > 0 && size > maxQty)
+        return { text: `Insufficient balance. Max quantity is ${formatQty(maxQty, baseDp)} ${base}`, tone: "red", blocking: true };
+    }
+    return null; // B11 — nothing to say.
+  }, [
+    isTradingEnabled, qty, side, currentPosition, symbolInfo, timeoutMs, price,
+    freeCollateral, maxQty, activeCount, base, quote, baseDp,
+  ]);
+
+  // Clear the interim/error (B9) line whenever the trader edits the form — the
+  // reactive `gate` then takes over. Does not touch `success` (its own 30s
+  // timer) or the in-flight "Placing…" (nothing changes mid-submit).
+  React.useEffect(() => {
+    setStatus("");
+  }, [qty, notional, timeoutMs, side, strategy]);
 
   // Live progress is NOT tracked here. A placed ticket appears under Running in
   // the Bot tab, which follows every ticket on the account rather than only the
@@ -282,62 +362,22 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   // screen twice, with two things able to disagree about it.
 
   async function onSubmit() {
-    if (!isTradingEnabled) {
-      setStatus("Connect your wallet and enable trading first");
+    // ── Validation split ──────────────────────────────────────────────────
+    // ALL input validation lives in the reactive `gate` (B0–B8): connected,
+    // market status / pre-market, concurrency (B2), quantity (B3), duration
+    // (B4), min notional (B5), balance / max qty (B7/B8). It drives both the
+    // button-disable and this guard, so they can never disagree. Re-check it
+    // here because a click can race a state change.
+    //
+    // onSubmit owns ONLY what cannot be known until the request is sent:
+    //   - credential rejected/expired  → re-adopt and retry once (NotSignedIn)
+    //   - executor still provisioning  → 3009 → wait for ready, place again
+    //   - any other placement failure  → B9 "Failed to place order: …"
+    if (gate?.blocking) {
+      setStatus(gate.text);
       return;
     }
     const size = Number(qty);
-    if (!Number.isFinite(size) || size <= 0) {
-      setStatus("Enter a quantity in the order form above");
-      return;
-    }
-    // Timeout must be a real TWAP window: at least a minute (below that there is
-    // nothing to slice), at most a week.
-    const MIN_TIMEOUT_MS = 60_000; // 1 minute
-    const MAX_TIMEOUT_MS = 168 * 60 * 60_000; // 168 hours (7 days)
-    if (timeoutMs < MIN_TIMEOUT_MS || timeoutMs > MAX_TIMEOUT_MS) {
-      setStatus("Timeout must be between 1 minute and 168 hours");
-      return;
-    }
-    // Notional gate — mirrors the executor. An order that OPENS or increases the
-    // position must clear the exchange's minimum notional, or every slice falls
-    // below the minimum, gets rejected, and the ticket sits doing nothing until
-    // it expires. A REDUCE (trading against the current position) is exempt: you
-    // can always close a position, however small the remainder.
-    const tradeDir = side === "BUY" ? 1 : -1;
-    const isReduce = currentPosition !== 0 && Math.sign(currentPosition) !== tradeDir;
-    // Market-state gate: Orderly marks a market REDUCE_ONLY (e.g. a stock perp
-    // outside trading hours) or otherwise non-ACTIVE (POST_ONLY, DELISTING).
-    // Opening then is rejected slice-by-slice and the ticket sits idle — check
-    // the instrument's own `status` up front instead. Reducing a REDUCE_ONLY
-    // market is still allowed (that is what the state permits); any other
-    // non-ACTIVE status blocks the market entirely.
-    const marketStatus = String(symbolInfo?.("status", "ACTIVE") ?? "ACTIVE");
-    if (marketStatus === "REDUCE_ONLY" && !isReduce) {
-      setStatus(`${base}-PERP is in reduce-only mode — you can only reduce or close a position`);
-      return;
-    }
-    if (marketStatus !== "ACTIVE" && marketStatus !== "REDUCE_ONLY") {
-      setStatus(`${base}-PERP is not open for trading (status: ${marketStatus})`);
-      return;
-    }
-    // Pre-market (pre-TGE) gate: `is_pretge` marks a listing whose token has not
-    // had its generation event yet. Treat it like reduce-only — do not open new
-    // TWAP exposure on a pre-market instrument, but still allow winding an
-    // existing position down. (Most pre-TGE listings are also permissionless and
-    // are already blocked above; this catches an official one.)
-    const isPretge = Boolean(symbolInfo?.("is_pretge", false));
-    if (isPretge && !isReduce) {
-      setStatus(`${base}-PERP is a pre-market (pre-TGE) listing — you can only reduce or close a position`);
-      return;
-    }
-    const minNotional = Number(symbolInfo?.("min_notional", 0)) || 0;
-    if (!isReduce && minNotional > 0 && price > 0 && size * price < minNotional) {
-      setStatus(
-        `Order size must be at least ${minNotional} ${quote} (min notional), or reduce your position`,
-      );
-      return;
-    }
     // Ticket target is ABSOLUTE (executor computes the delta to trade).
     const target_position = currentPosition + (side === "BUY" ? size : -size);
     const ticket = {
@@ -588,14 +628,14 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
 
       <button
         className={`oui-mt-1 oui-py-2 oui-rounded oui-text-white ${
-          !isTradingEnabled || submitting
+          !isTradingEnabled || submitting || gate?.blocking
             ? "oui-bg-base-6 oui-cursor-not-allowed"
             : side === "BUY"
               ? "oui-bg-success"
               : "oui-bg-danger"
         }`}
         onClick={onSubmit}
-        disabled={!isTradingEnabled || submitting}
+        disabled={!isTradingEnabled || submitting || !!gate?.blocking}
       >
         {/* A4: while placing, the button reads "Placing order..." and is
             disabled so a second click cannot place a duplicate. Otherwise it
@@ -620,9 +660,22 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
             View execution details in Bot → TWAP
           </span>
         </div>
-      ) : (
-        status && <div className="oui-text-xs oui-text-base-contrast-54">{status}</div>
-      )}
+      ) : status ? (
+        // Interim progress ("Placing…", "Setting up your account…") or a B9
+        // failure — takes the line while it is set; cleared when the trader next
+        // edits the form (see the effect above).
+        <div className="oui-text-xs oui-text-base-contrast-54">{status}</div>
+      ) : gate ? (
+        // The reactive B-line (B1–B8): red for a hard block, grey for an
+        // input-not-ready hint. Only the highest-priority one is here.
+        <div
+          className={`oui-text-xs ${
+            gate.tone === "red" ? "oui-text-danger" : "oui-text-base-contrast-54"
+          }`}
+        >
+          {gate.text}
+        </div>
+      ) : null}
     </div>
   );
 }
