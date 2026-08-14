@@ -305,8 +305,13 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         render: (_v, r) => <Filled pct={pctOf(r)} />,
       },
       {
+        // Unique dataIndex: it is the column's identity in DataTable, and the
+        // "Filled" column above already uses `executed_position`. Two columns
+        // sharing a dataIndex collided — the header rendered "Filled" several
+        // times and the columns fell out of alignment ("跑版"). The render reads
+        // the whole row, so the dataIndex need not map to a real field.
         title: "Filled / Total amount",
-        dataIndex: "executed_position",
+        dataIndex: "filled_total",
         width: 170,
         render: (_v, r) => (
           <span className="oui-tabular-nums">
@@ -350,8 +355,10 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       ticketId,
       ...rest,
       {
+        // Unique dataIndex (the "Ticket ID" column already uses `ticket_id`) —
+        // see the Filled/Total note above; a shared dataIndex collided.
         title: "Actions",
-        dataIndex: "ticket_id",
+        dataIndex: "actions",
         type: "action",
         width: 130,
         render: (_v, r) => {
