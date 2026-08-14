@@ -112,6 +112,11 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   const [onlyThisPair, setOnlyThisPair] = React.useState(false);
   const [needsSignIn, setNeedsSignIn] = React.useState(false);
   const [error, setError] = React.useState("");
+  // Ticket ids whose End was clicked and is still settling. Cancelling is not
+  // instant (request round-trip, then the next poll moves the ticket to
+  // History), so the button locks and reads "Ending…" meanwhile — otherwise it
+  // looks like nothing happened and gets clicked again.
+  const [ending, setEnding] = React.useState<Set<string>>(() => new Set());
 
   const { state } = useAccount();
   const brokerId = useConfig<string>("brokerId");
@@ -216,10 +221,21 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   const end = React.useCallback(
     async (ticketId: string) => {
       setError("");
+      // Lock this row's button immediately so the click registers and cannot be
+      // repeated while the cancel is in flight.
+      setEnding((s) => new Set(s).add(ticketId));
       try {
         await cancelTicket(ticketId, session);
+        // Stay locked on success: the ticket is still in Running until the next
+        // poll moves it to History, and we do not want it clickable in between.
       } catch (e: any) {
         setError(`Could not end ${ticketId.slice(0, 10)}…: ${e?.message ?? e}`);
+        // Unlock so the trader can retry a genuinely failed cancel.
+        setEnding((s) => {
+          const n = new Set(s);
+          n.delete(ticketId);
+          return n;
+        });
       }
     },
     [session],
@@ -228,6 +244,19 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   const visible = (rows ?? [])
     .filter((t) => (view === "running" ? !TERMINAL.includes(t.status) : TERMINAL.includes(t.status)))
     .filter((t) => !onlyThisPair || !symbol || t.symbol === symbol);
+
+  // Drop "ending" marks once a ticket is no longer running (the poll has moved
+  // it to History), so the set does not grow and a reused id never starts locked.
+  React.useEffect(() => {
+    setEnding((s) => {
+      if (s.size === 0) return s;
+      const running = new Set(
+        (rows ?? []).filter((t) => !TERMINAL.includes(t.status)).map((t) => t.ticket_id),
+      );
+      const next = new Set([...s].filter((id) => running.has(id)));
+      return next.size === s.size ? s : next;
+    });
+  }, [rows]);
 
   const runningCount = (rows ?? []).filter((t) => !TERMINAL.includes(t.status)).length;
 
@@ -325,30 +354,39 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         dataIndex: "ticket_id",
         type: "action",
         width: 130,
-        render: (_v, r) => (
-          <span>
-            {/* A TWAP runs for minutes, so it has to be stoppable. Ending it
-                keeps whatever has already filled. */}
-            <button
-              className="oui-text-warning hover:oui-underline"
-              onClick={(e) => {
-                e.stopPropagation();
-                void end(r.ticket_id);
-              }}
-            >
-              End
-            </button>
-            {/* Past its window but still working: the engine keeps a ticket
-                running after expiry, so say so rather than implying it
-                stopped. */}
-            {r.is_expired && (
-              <span className="oui-ml-2 oui-text-base-contrast-36">past window</span>
-            )}
-          </span>
-        ),
+        render: (_v, r) => {
+          // A TWAP runs for minutes, so it has to be stoppable. Ending it keeps
+          // whatever has already filled. While the cancel settles the button
+          // locks and reads "Ending…" so it registers and is not double-clicked.
+          const isEnding = ending.has(r.ticket_id);
+          return (
+            <span>
+              <button
+                disabled={isEnding}
+                className={
+                  isEnding
+                    ? "oui-text-base-contrast-36 oui-cursor-not-allowed"
+                    : "oui-text-warning hover:oui-underline"
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isEnding) void end(r.ticket_id);
+                }}
+              >
+                {isEnding ? "Ending…" : "End"}
+              </button>
+              {/* Past its window but still working: the engine keeps a ticket
+                  running after expiry, so say so rather than implying it
+                  stopped. */}
+              {!isEnding && r.is_expired && (
+                <span className="oui-ml-2 oui-text-base-contrast-36">past window</span>
+              )}
+            </span>
+          );
+        },
       },
     ];
-  }, [view, end]);
+  }, [view, end, ending]);
 
   return (
     <div className="oui-flex oui-h-full oui-min-h-0 oui-flex-col oui-text-xs">
@@ -402,7 +440,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
           )}
         </div>
       ) : (
-        <div className="oui-min-h-0 oui-flex-1">
+        <div className="oui-min-h-0 oui-flex-1 oui-overflow-x-auto">
           <DataTable<TicketProgress>
             columns={columns}
             dataSource={visible}
@@ -410,8 +448,14 @@ export function BotPanel({ symbol }: { symbol?: string }) {
             generatedRowKey={(r: any) => r.ticket_id}
             // The SDK owns the scroll container. `h-full` fills the tab when the
             // host bounds it; the max-h keeps the list scrollable rather than
-            // pushing the page down if it does not.
-            classNames={{ root: "oui-h-full", scroll: "oui-h-full oui-max-h-[420px]" }}
+            // pushing the page down if it does not. `overflow-x-auto` (here and
+            // on the wrapper) makes the fixed-width columns SCROLL sideways when
+            // the panel is narrower than their total, instead of overflowing and
+            // knocking the header out of line with the body (the "跑版" PM saw).
+            classNames={{
+              root: "oui-h-full",
+              scroll: "oui-h-full oui-max-h-[420px] oui-overflow-x-auto",
+            }}
             emptyView={
               <div className="oui-py-8 oui-text-center oui-text-xs oui-text-base-contrast-36">
                 {error
