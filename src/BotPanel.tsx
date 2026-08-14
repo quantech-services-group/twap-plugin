@@ -57,12 +57,12 @@ function pair(symbol: string): string {
 }
 
 function totalOf(t: TicketProgress): number {
-  return Math.abs(t.target_position - t.init_position);
+  return t.size;
 }
 
 function pctOf(t: TicketProgress): number {
   const total = totalOf(t);
-  return total > 0 ? Math.min(100, (Math.abs(t.executed_position) / total) * 100) : 0;
+  return total > 0 ? Math.min(100, (t.filled_size / total) * 100) : 0;
 }
 
 /** Percentage with the filled bar under it, as in the reference design. */
@@ -286,10 +286,10 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       },
       {
         title: "Direction",
-        dataIndex: "target_position",
+        dataIndex: "side",
         width: 90,
         render: (_v, r) => {
-          const isBuy = r.target_position >= r.init_position;
+          const isBuy = r.side === "BUY";
           return (
             <span className={isBuy ? "oui-text-success" : "oui-text-danger"}>
               {isBuy ? "Buy" : "Sell"}
@@ -299,14 +299,14 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       },
       {
         title: "Filled",
-        dataIndex: "executed_position",
+        dataIndex: "filled_size",
         width: 90,
         onSort: (a, b) => pctOf(a) - pctOf(b),
         render: (_v, r) => <Filled pct={pctOf(r)} />,
       },
       {
         // Unique dataIndex: it is the column's identity in DataTable, and the
-        // "Filled" column above already uses `executed_position`. Two columns
+        // "Filled" column above already uses `filled_size`. Two columns
         // sharing a dataIndex collided — the header rendered "Filled" several
         // times and the columns fell out of alignment ("跑版"). The render reads
         // the whole row, so the dataIndex need not map to a real field.
@@ -315,7 +315,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         width: 170,
         render: (_v, r) => (
           <span className="oui-tabular-nums">
-            {qty(Math.abs(r.executed_position))} / {qty(totalOf(r))}{" "}
+            {qty(r.filled_size)} / {qty(totalOf(r))}{" "}
             <span className="oui-text-base-contrast-36">{r.symbol.split("_")[1] ?? ""}</span>
           </span>
         ),
@@ -382,12 +382,11 @@ export function BotPanel({ symbol }: { symbol?: string }) {
               >
                 {isEnding ? "Ending…" : "End"}
               </button>
-              {/* Past its window but still working: the engine keeps a ticket
-                  running after expiry, so say so rather than implying it
-                  stopped. */}
-              {!isEnding && r.is_expired && (
-                <span className="oui-ml-2 oui-text-base-contrast-36">past window</span>
-              )}
+              {/* No "past window" tag here any more: expiry is now a terminal
+                  hard-stop (specs/orderly-venue-v2.md §6.5.5) — a ticket that
+                  hits its time_constraint_ms cancels its orders and moves to
+                  status EXPIRED under History, so a row in Running can no
+                  longer be "past its window but still working". */}
             </span>
           );
         },

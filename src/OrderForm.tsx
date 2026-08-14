@@ -225,8 +225,10 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
 
   // Live account state from the Orderly SDK (the panel is rendered inside
   // OrderlyAppProvider, so these stream hooks are in-context).
-  //  - current signed position for this symbol → target_position is computed as
-  //    an ABSOLUTE target off the real starting position, not a flat assumption.
+  //  - current signed position for this symbol → used only for the reduce-only
+  //    gate math below (the ticket itself is a DELTA, not a target position:
+  //    the executor tracks its own filled_size and never reads position for
+  //    progress — see specs/orderly-venue-v2.md §6.5).
   //  - free collateral → the "Available" figure shown under Buy/Sell.
   const [positionInfo] = usePositionStream(orderlySymbol);
   const currentPosition =
@@ -274,14 +276,22 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   );
 
   // Count of the account's still-working TWAP tickets, for the B2 concurrency
-  // cap (20, across all pairs). Read-only peek at the existing session — never
-  // pops a signature — refreshed on a slow cadence since it changes rarely.
+  // cap (20, across all pairs), and the summed size of this symbol's still-open
+  // tickets, for the margin gate (§6.5.8): the executor is position-blind at
+  // the ticket level (each ticket tracks only its own delta), so two `+1`
+  // tickets under a `1.5` maxQty are each individually fine and only visible
+  // once summed — that sum is computed here, front-end only, since the
+  // executor itself does no cross-ticket margin check this phase.
+  // Read-only peek at the existing session — never pops a signature — and
+  // refreshed on a slow cadence since it changes rarely.
   const [activeCount, setActiveCount] = React.useState(0);
+  const [openSizeThisSymbol, setOpenSizeThisSymbol] = React.useState(0);
   React.useEffect(() => {
     const session =
       address && brokerId && chainId ? peekSession(brokerId, address, chainId) : undefined;
     if (!session) {
       setActiveCount(0);
+      setOpenSizeThisSymbol(0);
       return;
     }
     let cancelled = false;
@@ -289,7 +299,12 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     const load = () =>
       queryTickets(session)
         .then((ts) => {
-          if (!cancelled) setActiveCount(ts.filter((t) => !TERMINAL.includes(t.status)).length);
+          if (cancelled) return;
+          const open = ts.filter((t) => !TERMINAL.includes(t.status));
+          setActiveCount(open.length);
+          setOpenSizeThisSymbol(
+            open.filter((t) => t.symbol === orderlySymbol).reduce((sum, t) => sum + t.size, 0),
+          );
         })
         .catch(() => undefined);
     load();
@@ -298,7 +313,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       cancelled = true;
       clearInterval(id);
     };
-  }, [address, brokerId, chainId]);
+  }, [address, brokerId, chainId, orderlySymbol]);
 
   // §3.7.2 region B — the single line under the button. Computed reactively from
   // the current form state so it updates as the trader types, and priority-
@@ -335,6 +350,22 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     // B2 — account-wide concurrency cap.
     if (activeCount >= 20)
       return { text: "You've reached the limit of 20 active TWAP orders. End an order to place a new one.", tone: "red", blocking: true };
+    // Margin gate (§6.5.8): the executor is position-blind per ticket — each
+    // ticket only ever tracks its own delta — so two small tickets on the same
+    // symbol can each look fine alone and still jointly exceed the account's
+    // real capacity. Block here on the FRONT END using the sum of this
+    // symbol's still-open ticket sizes (openSizeThisSymbol) plus the size being
+    // typed now, against the same `maxQty` the single-order B7 check below
+    // uses. No server-side backstop yet — a client that calls placeTicket
+    // directly bypasses this, and the exchange rejects the resulting
+    // over-margin order at execution time instead (the ticket stalls, it does
+    // not blow the account).
+    if (maxQty > 0 && size > 0 && openSizeThisSymbol + size > maxQty)
+      return {
+        text: `Combined size of your open ${base}-PERP orders (${formatQty(openSizeThisSymbol, baseDp)} ${base}) plus this order would exceed the max quantity of ${formatQty(maxQty, baseDp)} ${base}`,
+        tone: "red",
+        blocking: true,
+      };
     // B3 — no quantity.
     if (!Number.isFinite(size) || size <= 0)
       return { text: "Enter a quantity in the order form above", tone: "grey", blocking: true };
@@ -361,7 +392,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     return null; // B11 — nothing to say.
   }, [
     isTradingEnabled, qty, side, currentPosition, symbolInfo, timeoutMs, price,
-    freeCollateral, maxQty, activeCount, base, quote, baseDp,
+    freeCollateral, maxQty, activeCount, openSizeThisSymbol, base, quote, baseDp,
   ]);
 
   // Clear the interim/error (B9) line whenever the trader edits the form — the
@@ -393,14 +424,16 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
       return;
     }
     const size = Number(qty);
-    // Ticket target is ABSOLUTE (executor computes the delta to trade).
-    const target_position = currentPosition + (side === "BUY" ? size : -size);
     const ticket = {
       exchange: "orderly" as const,
       // Orderly-native symbol (e.g. "PERP_ETH_USDC") — matches the server's
       // instrument cache (GET /v1/public/info) and the executor's parser.
       symbol: orderlySymbol,
-      target_position,
+      // The ticket is a DELTA — "trade this much, this side" — not an
+      // absolute target position. The executor tracks its own filled_size
+      // and never reads position for progress (specs/orderly-venue-v2.md §6.5).
+      side,
+      size,
       time_constraint_ms: timeoutMs,
       strategy, // MAKER (rest at the touch) / TAKER (sliced IOC) — see api.Strategy
     };

@@ -414,21 +414,25 @@ async function forgetAll(session?: Session): Promise<void> {
 export interface TicketProgress {
   ticket_id: string;
   symbol: string;
-  target_position: number;
-  init_position: number;
-  executed_position: number;
+  /** Trade direction: "BUY" or "SELL". */
+  side: string;
+  /** Absolute delta size the ticket was placed for — not a target position. */
+  size: number;
+  /** Cumulative size filled so far. `remaining = size - filled_size`. */
+  filled_size: number;
+  /**
+   * NEW | OPEN | COMPLETE | CANCEL | EXPIRED. EXPIRED is now a real terminal
+   * status written by the executor once the ticket's time window elapses (it
+   * no longer keeps working past its deadline), so a finished ticket's status
+   * alone says why it stopped — there is no separate "still running past its
+   * window" state to track here.
+   */
   status: string;
   start_time_ms: number;
   time_constraint_ms: number;
   /** Last state change — for a finished ticket, when it ended. */
   last_update_time_ms: number;
   cancel_reason?: string | null;
-  /**
-   * Set once the execution window has elapsed. The engine keeps working the
-   * ticket by design, so this does NOT mean the order is finished — only
-   * `status` reaching a terminal value does.
-   */
-  is_expired?: boolean;
 }
 
 /**
@@ -618,8 +622,10 @@ export interface PlaceTicketParams {
   exchange: "orderly";
   /** Orderly-native symbol, e.g. "PERP_ETH_USDC" (matches the server instrument cache). */
   symbol: string;
-  /** Absolute target position (executor computes the delta to trade). */
-  target_position: number;
+  /** Trade direction: "BUY" or "SELL". */
+  side: "BUY" | "SELL";
+  /** Absolute delta size to execute (must be > 0) — NOT a target position. */
+  size: number;
   /** Execution deadline in ms (0 = immediate / market). */
   time_constraint_ms: number;
   /** Execution style — see [`Strategy`]. Omitted = TWAP. */
@@ -644,7 +650,8 @@ export async function placeTicket(
   const qs = new URLSearchParams({
     exchange: params.exchange,
     symbol: params.symbol,
-    target_position: String(params.target_position),
+    side: params.side,
+    size: String(params.size),
     time_constraint_ms: String(params.time_constraint_ms),
     ...(params.strategy ? { strategy: params.strategy } : {}),
   });
