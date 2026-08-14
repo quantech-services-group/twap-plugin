@@ -312,7 +312,15 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     if (!isTradingEnabled) return null; // B0
     const size = Number(qty);
     const tradeDir = side === "BUY" ? 1 : -1;
-    const isReduce = currentPosition !== 0 && Math.sign(currentPosition) !== tradeDir;
+    // A true reduce moves TOWARD zero without crossing it: opposite direction AND
+    // no bigger than the current position. An order that overshoots (e.g. long 6,
+    // sell 9 → short 3) is a FLIP — the part past zero opens fresh exposure, so it
+    // is NOT reduce-exempt and must face the open-only gates (min notional /
+    // balance) and a REDUCE_ONLY/pre-market block.
+    const isReduce =
+      currentPosition !== 0 &&
+      Math.sign(currentPosition) !== tradeDir &&
+      size <= Math.abs(currentPosition);
     const marketStatus = String(symbolInfo?.("status", "ACTIVE") ?? "ACTIVE");
     const isPretge = Boolean(symbolInfo?.("is_pretge", false));
     const minNotional = Number(symbolInfo?.("min_notional", 0)) || 0;
@@ -619,8 +627,8 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
           <Tooltip
             content={
               <div className="oui-max-w-[240px] oui-text-2xs oui-leading-snug">
-                <div>Taker: Fills faster, but usually at a worse price than Maker.</div>
-                <div className="oui-mt-1">Maker: Better price, but fills more slowly.</div>
+                <div>Taker: Fills faster, but usually at a worse price than Maker</div>
+                <div className="oui-mt-1">Maker: Better price, but fills more slowly</div>
               </div>
             }
           >
