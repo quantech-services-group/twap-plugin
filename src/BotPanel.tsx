@@ -71,6 +71,19 @@ function pctOf(t: TicketProgress): number {
   return total > 0 ? Math.min(100, (filledOf(t) / total) * 100) : 0;
 }
 
+/**
+ * The ticket's execution window in minutes — "5 min", "0.5 min" for the
+ * sub-minute windows tests use. Minutes because that is the unit the order
+ * form takes the duration in, so the two read the same.
+ */
+function timeoutOf(t: TicketProgress): string {
+  const ms = t.time_constraint_ms;
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  const min = ms / 60_000;
+  // One decimal, trimmed: 300000 → "5 min", 450000 → "7.5 min", 30000 → "0.5 min".
+  return `${Number(min.toFixed(1))} min`;
+}
+
 function sideOf(t: TicketProgress): string {
   return t.side;
 }
@@ -354,6 +367,15 @@ export function BotPanel({ symbol }: { symbol?: string }) {
             {qty(filledOf(r))} / {qty(totalOf(r))}{" "}
             <span className="oui-text-base-contrast-36">{r.symbol.split("_")[1] ?? ""}</span>
           </span>
+        ),
+      },
+      {
+        title: "Timeout",
+        dataIndex: "time_constraint_ms",
+        width: 90,
+        onSort: true,
+        render: (_v, r) => (
+          <span className="oui-tabular-nums oui-text-base-contrast-54">{timeoutOf(r)}</span>
         ),
       },
       {
