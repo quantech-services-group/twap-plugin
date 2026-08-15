@@ -28,7 +28,6 @@ import {
   queryTickets,
   shortTicketId,
   NotSignedInError,
-  type ExecVersion,
   type Session,
   type TicketProgress,
 } from "./api.js";
@@ -57,18 +56,14 @@ function pair(symbol: string): string {
   return base ? `${base}-PERP` : symbol;
 }
 
-/**
- * "Total" for the Filled/Total column: v2's placed `size`, or v1's
- * `target_position` — read as a magnitude either way, since a target can be
- * negative (a short target) while the column is a plain quantity.
- */
+/** "Total" for the Filled/Total column — the ticket's placed `size`. */
 function totalOf(t: TicketProgress): number {
-  return Math.abs(t.exec_version === "v1" ? t.target_position : t.size);
+  return Math.abs(t.size);
 }
 
-/** "Filled" counterpart to `totalOf` — v2's `filled_size`, or v1's `executed_position`. */
+/** "Filled" counterpart to `totalOf` — the ticket's `filled_size`. */
 function filledOf(t: TicketProgress): number {
-  return Math.abs(t.exec_version === "v1" ? t.executed_position : t.filled_size);
+  return Math.abs(t.filled_size);
 }
 
 function pctOf(t: TicketProgress): number {
@@ -76,24 +71,11 @@ function pctOf(t: TicketProgress): number {
   return total > 0 ? Math.min(100, (filledOf(t) / total) * 100) : 0;
 }
 
-/**
- * v1 has no `side` field — the ticket drives the account's position toward
- * `target_position`, so direction is whichever way still closes that gap.
- * v2 carries `side` outright.
- */
 function sideOf(t: TicketProgress): string {
-  if (t.exec_version === "v2") return t.side;
-  return t.target_position - t.executed_position >= 0 ? "BUY" : "SELL";
+  return t.side;
 }
 
-/**
- * v1 predates `status: "EXPIRED"` and reports the same fact through
- * `is_expired` instead (see `TicketProgressV1` in api.ts) — fold it into the
- * same terminal name v2 uses so filtering and the Status column need only
- * ever look at one string.
- */
 function statusOf(t: TicketProgress): string {
-  if (t.exec_version === "v1" && t.is_expired && t.status !== "EXPIRED") return "EXPIRED";
   return t.status;
 }
 
@@ -140,10 +122,6 @@ function TicketId({ id }: { id: string }) {
 
 export function BotPanel({ symbol }: { symbol?: string }) {
   const [rows, setRows] = React.useState<TicketProgress[] | null>(null);
-  // Which ticket API the panel talks to. Defaults to v2 (the current model,
-  // what every new account is on); v1 is there for old accounts still on the
-  // position-target model the server used before the split.
-  const [execVersion, setExecVersion] = React.useState<ExecVersion>("v2");
   const [view, setView] = React.useState<"running" | "history">("running");
   const [onlyThisPair, setOnlyThisPair] = React.useState(false);
   const [needsSignIn, setNeedsSignIn] = React.useState(false);
@@ -176,13 +154,10 @@ export function BotPanel({ symbol }: { symbol?: string }) {
 
   React.useEffect(() => {
     let cancelled = false;
-    // Switching versions points at a different endpoint with a different
-    // ticket shape — show loading rather than the other version's rows while
-    // the first fetch under the new version is in flight.
     setRows(null);
     const load = async () => {
       try {
-        const list = await queryTickets(session, 50, execVersion);
+        const list = await queryTickets(session, 50);
         if (cancelled) return;
         setRows(list);
         setNeedsSignIn(false);
@@ -202,7 +177,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       cancelled = true;
       clearInterval(poll);
     };
-  }, [session, execVersion]);
+  }, [session]);
 
   const [busy, setBusy] = React.useState(false);
 
@@ -265,7 +240,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       // repeated while the cancel is in flight.
       setEnding((s) => new Set(s).add(ticketId));
       try {
-        await cancelTicket(ticketId, session, execVersion);
+        await cancelTicket(ticketId, session);
         // Stay locked on success: the ticket is still in Running until the next
         // poll moves it to History, and we do not want it clickable in between.
       } catch (e: any) {
@@ -278,7 +253,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         });
       }
     },
-    [session, execVersion],
+    [session],
   );
 
   const visible = (rows ?? [])
@@ -328,8 +303,6 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         title: "Direction",
         dataIndex: "side",
         width: 90,
-        // v2 rows carry `side` outright; v1 rows have none, so `sideOf` derives
-        // it from whichever way still closes target_position - executed_position.
         render: (_v, r) => {
           const isBuy = sideOf(r) === "BUY";
           return (
@@ -352,12 +325,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         // sharing a dataIndex collided — the header rendered "Filled" several
         // times and the columns fell out of alignment ("跑版"). The render reads
         // the whole row, so the dataIndex need not map to a real field.
-        //
-        // Title names the v1/v2 fields it is actually reading — "Filled /
-        // Total" for v2's filled_size/size, "Executed / Target" for v1's
-        // executed_position/target_position — so the header matches the model
-        // the active tab is on rather than implying every row has a `size`.
-        title: execVersion === "v1" ? "Executed / Target position" : "Filled / Total amount",
+        title: "Filled / Total amount",
         dataIndex: "filled_total",
         width: 170,
         render: (_v, r) => (
@@ -390,9 +358,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
           onSort: true,
           // The ticket's own status verbatim — NEW / OPEN / COMPLETE / CANCEL /
           // EXPIRED. It is the value the API, the logs and support all quote,
-          // so renaming it here would only make those disagree. `statusOf`
-          // folds v1's `is_expired` flag into "EXPIRED" so both versions read
-          // the same way; anything else already matches its own `status`.
+          // so renaming it here would only make those disagree.
           render: (_v, r) => (
             <span className={statusOf(r) === "COMPLETE" ? "" : "oui-text-warning"}>
               {statusOf(r)}
@@ -443,7 +409,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         },
       },
     ];
-  }, [view, execVersion, end, ending]);
+  }, [view, end, ending]);
 
   return (
     <div className="oui-flex oui-h-full oui-min-h-0 oui-flex-col oui-text-xs">
@@ -451,27 +417,6 @@ export function BotPanel({ symbol }: { symbol?: string }) {
           sit beside it without moving anything. */}
       <div className="oui-flex oui-items-center oui-gap-2 oui-border-b oui-border-base-6 oui-px-3 oui-py-2">
         <span className="oui-rounded oui-bg-base-5 oui-px-2 oui-py-1">TWAP</span>
-      </div>
-
-      {/* V1 (legacy, position-target) / V2 (current, delta) — the server was
-          split in two, each version with its own endpoints and ticket shape.
-          Default is V2: every new account is on it, and V1 exists only for
-          accounts onboarded before the split. Switching refetches from that
-          version's endpoints (see the effect keyed on `execVersion`) and swaps
-          the columns below to match its ticket shape. */}
-      <div className="oui-flex oui-items-center oui-gap-3 oui-border-b oui-border-base-6 oui-px-3 oui-py-2 oui-text-base-contrast-36">
-        <span>Execution:</span>
-        {(["v2", "v1"] as const).map((v) => (
-          <button
-            key={v}
-            className={`oui-rounded oui-px-2 oui-py-1 oui-uppercase ${
-              execVersion === v ? "oui-bg-base-5 oui-text-base-contrast" : "oui-text-base-contrast-54"
-            }`}
-            onClick={() => setExecVersion(v)}
-          >
-            {v}
-          </button>
-        ))}
       </div>
 
       {/* Running / History, and how fresh the numbers are. */}

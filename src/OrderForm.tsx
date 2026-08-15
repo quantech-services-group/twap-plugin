@@ -36,7 +36,6 @@ import {
   queryTickets,
   type Session,
   type Strategy,
-  type TicketProgressV2,
 } from "./api.js";
 
 /** Duration presets → time_constraint in ms. */
@@ -303,14 +302,8 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
           if (cancelled) return;
           const open = ts.filter((t) => !TERMINAL.includes(t.status));
           setActiveCount(open.length);
-          // `queryTickets` above is called with no version, i.e. its v2
-          // default — the model this form places against — so every row here
-          // is already a v2 ticket; the `exec_version` check is a type guard
-          // (`size` only exists on `TicketProgressV2`), not a real filter.
-          const isV2 = (t: (typeof open)[number]): t is TicketProgressV2 => t.exec_version === "v2";
           setOpenSizeThisSymbol(
             open
-              .filter(isV2)
               .filter((t) => t.symbol === orderlySymbol)
               .reduce((sum, t) => sum + t.size, 0),
           );

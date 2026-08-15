@@ -329,7 +329,7 @@ export async function authorize(
   if (cached && cached.key_fp === fp) return cached;
 
   const requestKey = await getOrCreateKey(brokerId, address, chain_id);
-  const res = await fetch(`${twapServerUrl()}/execution/v1/onboard/adopt`, {
+  const res = await fetch(`${twapServerUrl()}/execution/v2/onboard/adopt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -411,26 +411,15 @@ async function forgetAll(session?: Session): Promise<void> {
   if (session) await dropKey(session.brokerId, session.address, session.chain_id);
 }
 
-/**
- * Which ticket API a request talks to. The server was split in two: old
- * accounts still read/write the position-target model at `/execution/v1`;
- * new accounts get the per-ticket delta model at `/execution/v2`. Nothing
- * else about a request changes — same auth, same host — only this segment of
- * the path, and correspondingly the shape of what comes back.
- */
-export type ExecVersion = "v1" | "v2";
-
-/** Fields both ticket shapes carry, regardless of version. */
+/** Fields a ticket doc carries. */
 interface TicketCommon {
   ticket_id: string;
   symbol: string;
   /**
-   * NEW | OPEN | COMPLETE | CANCEL | EXPIRED. EXPIRED is now a real terminal
+   * NEW | OPEN | COMPLETE | CANCEL | EXPIRED. EXPIRED is a real terminal
    * status written by the executor once the ticket's time window elapses (it
    * no longer keeps working past its deadline), so a finished ticket's status
-   * alone says why it stopped — there is no separate "still running past its
-   * window" state to track here. (v1 predates this convention and reports the
-   * same fact through `is_expired` instead — see `TicketProgressV1`.)
+   * alone says why it stopped.
    */
   status: string;
   start_time_ms: number;
@@ -441,26 +430,10 @@ interface TicketCommon {
 }
 
 /**
- * v1 (legacy) ticket doc — the position-target model old accounts still run
- * on. The ticket drives the account's position on `symbol` toward
- * `target_position`; `executed_position` is how far it has gotten so far.
- * There is no `side` field: direction is whichever way moves
- * `executed_position` toward `target_position`, so the UI derives it rather
- * than reading it (see `sideOf` in BotPanel).
+ * A ticket doc, as read back from the v2 (current) API — the per-ticket
+ * delta model every account runs on.
  */
-export interface TicketProgressV1 extends TicketCommon {
-  exec_version: "v1";
-  target_position: number;
-  executed_position: number;
-  /** v1's own terminal flag, predating `status: "EXPIRED"` (see `TicketCommon.status`). */
-  is_expired: boolean;
-}
-
-/**
- * v2 (current) ticket doc — the per-ticket delta model.
- */
-export interface TicketProgressV2 extends TicketCommon {
-  exec_version: "v2";
+export interface TicketProgress extends TicketCommon {
   /** Trade direction: "BUY" or "SELL". */
   side: string;
   /** Absolute delta size the ticket was placed for — not a target position. */
@@ -470,47 +443,26 @@ export interface TicketProgressV2 extends TicketCommon {
 }
 
 /**
- * A ticket as read back from either API. `exec_version` is stamped on by the
- * functions below — the wire body itself carries no such field, it is
- * implied by which endpoint answered — so this is a discriminated union:
- * narrow on `exec_version` once and TypeScript knows which fields exist.
- */
-export type TicketProgress = TicketProgressV1 | TicketProgressV2;
-
-/** Stamp the version onto a raw ticket doc from the wire. */
-function withVersion(version: ExecVersion, raw: unknown): TicketProgress {
-  return { ...(raw as object), exec_version: version } as TicketProgress;
-}
-
-/**
  * Ticket id shortened for display — first 10 and last 4, the form used both in
  * the Bot tab's ID column and the "Placed …" confirmation, so the two never
  * disagree about how an id looks.
  */
 export const shortTicketId = (id: string): string => `${id.slice(0, 10)}…${id.slice(-4)}`;
 
-/** `/execution/v1/tickets` or `/execution/v2/tickets`, per `version`. */
-function ticketsPath(version: ExecVersion): string {
-  return `/execution/${version}/tickets`;
-}
+/** Every ticket call hits the v2 (current) API. */
+const TICKETS_PATH = "/execution/v2/tickets";
 
-/**
- * Fetch one ticket so the panel can show how far execution has got.
- *
- * `version` defaults to "v2" (the current model, for new accounts) — pass
- * "v1" explicitly for a legacy account's ticket.
- */
+/** Fetch one ticket so the panel can show how far execution has got. */
 export async function queryTicket(
   ticketId: string,
   session?: Session,
-  version: ExecVersion = "v2",
 ): Promise<TicketProgress | null> {
   const qs = new URLSearchParams({ exchange: "orderly", ticket_id: ticketId });
-  const res = await call("GET", `${ticketsPath(version)}/queryAllTickets?${qs}`, session);
+  const res = await call("GET", `${TICKETS_PATH}/queryAllTickets?${qs}`, session);
   if (!res.ok) return null;
   const body = (await res.json()) as { tickets?: Array<{ ticket_id: string }> };
   const found = body.tickets?.find((t) => t.ticket_id === ticketId);
-  return found ? withVersion(version, found) : null;
+  return (found as TicketProgress | undefined) ?? null;
 }
 
 /**
@@ -518,32 +470,24 @@ export async function queryTicket(
  *
  * A TWAP keeps working after the page is closed, so on mount the panel asks
  * whether one is already running rather than showing nothing until the trader
- * places another. `version` defaults to "v2"; pass "v1" for a legacy account.
+ * places another.
  */
 export async function queryOpenTicket(
   symbol: string,
   session?: Session,
-  version: ExecVersion = "v2",
 ): Promise<TicketProgress | null> {
   const qs = new URLSearchParams({ exchange: "orderly", symbol });
-  const res = await call("GET", `${ticketsPath(version)}/queryOpenTickets?${qs}`, session);
+  const res = await call("GET", `${TICKETS_PATH}/queryOpenTickets?${qs}`, session);
   if (!res.ok) return null;
   const body = (await res.json()) as { tickets?: unknown[] };
   const first = body.tickets?.[0];
-  return first ? withVersion(version, first) : null;
+  return (first as TicketProgress | undefined) ?? null;
 }
 
-/**
- * Stop a working ticket. It keeps whatever has already filled. `version`
- * defaults to "v2"; pass "v1" to cancel a legacy account's ticket.
- */
-export async function cancelTicket(
-  ticketId: string,
-  session?: Session,
-  version: ExecVersion = "v2",
-): Promise<void> {
+/** Stop a working ticket. It keeps whatever has already filled. */
+export async function cancelTicket(ticketId: string, session?: Session): Promise<void> {
   const qs = new URLSearchParams({ exchange: "orderly", ticket_id: ticketId });
-  const res = await call("DELETE", `${ticketsPath(version)}/cancelTicket?${qs}`, session);
+  const res = await call("DELETE", `${TICKETS_PATH}/cancelTicket?${qs}`, session);
   if (res.status === 401 || res.status === 403) {
     await forgetAll(session);
     throw new NotSignedInError();
@@ -657,17 +601,10 @@ export async function waitForExecutorReady(
  *
  * Throws rather than returning `[]` on failure: an empty list is a real answer
  * ("no orders yet") and must not be indistinguishable from a failed request.
- *
- * `version` defaults to "v2" (new accounts, the model `OrderForm` places
- * against); the Bot panel passes it explicitly per its V1/V2 tab.
  */
-export async function queryTickets(
-  session?: Session,
-  limit = 50,
-  version: ExecVersion = "v2",
-): Promise<TicketProgress[]> {
+export async function queryTickets(session?: Session, limit = 50): Promise<TicketProgress[]> {
   const qs = new URLSearchParams({ exchange: "orderly", limit: String(limit) });
-  const res = await call("GET", `${ticketsPath(version)}/queryAllTickets?${qs}`, session);
+  const res = await call("GET", `${TICKETS_PATH}/queryAllTickets?${qs}`, session);
   // A rejected credential is a state with an action attached, not a load
   // failure: drop it and say so, so the panel offers the button again instead
   // of showing "could not load your orders" until someone clears storage by
@@ -683,7 +620,7 @@ export async function queryTickets(
   // duplicate-key warning in the table. Keep the freshest copy per id.
   const byId = new Map<string, TicketProgress>();
   for (const raw of body.tickets ?? []) {
-    const t = withVersion(version, raw);
+    const t = raw as TicketProgress;
     const prev = byId.get(t.ticket_id);
     if (!prev || (t.last_update_time_ms ?? 0) >= (prev.last_update_time_ms ?? 0)) {
       byId.set(t.ticket_id, t);
@@ -713,18 +650,13 @@ export interface PlaceTicketResponse {
 }
 
 /**
- * POST /execution/{v1,v2}/tickets/placeTicket. With a `session`, signs the
+ * POST /execution/v2/tickets/placeTicket. With a `session`, signs the
  * request with this browser's key. Without one, falls back to the static
  * `globalThis` key (demo/local only).
- *
- * `version` defaults to "v2": new placements are the delta model regardless
- * of which tab the Bot panel happens to be showing, since v1 is a read path
- * for accounts already on the legacy model, not something new tickets join.
  */
 export async function placeTicket(
   params: PlaceTicketParams,
   session?: Session,
-  version: ExecVersion = "v2",
 ): Promise<PlaceTicketResponse> {
   const qs = new URLSearchParams({
     exchange: params.exchange,
@@ -735,7 +667,7 @@ export async function placeTicket(
     ...(params.strategy ? { strategy: params.strategy } : {}),
   });
 
-  const res = await call("POST", `${ticketsPath(version)}/placeTicket?${qs}`, session);
+  const res = await call("POST", `${TICKETS_PATH}/placeTicket?${qs}`, session);
 
   // A rejected credential here read as "API key is invalid or missing", which
   // points at configuration and is the wrong thing to go and check. Drop it so
