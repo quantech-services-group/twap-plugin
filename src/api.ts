@@ -553,7 +553,7 @@ function parseErrorCode(body: string): number | undefined {
  * account up, then RUNNING.
  */
 export async function executorStatus(session?: Session): Promise<ExecutorStatus> {
-  const res = await call("GET", "/execution/v1/executor/status", session);
+  const res = await call("GET", "/execution/v2/executor/status", session);
   if (!res.ok) throw new Error(`executorStatus ${res.status}: ${await res.text()}`);
   const body = (await res.json()) as { status?: ExecutorStatus };
   if (body.status !== "RUNNING" && body.status !== "PAUSED" && body.status !== "SHUTDOWN") {
