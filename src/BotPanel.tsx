@@ -145,16 +145,25 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   // cluster: switching networks must show that cluster's orders rather than
   // keep presenting the previous one's.
   const chainId = connectedChain?.id ? Number(connectedChain.id) : undefined;
-  const [session, setSession] = React.useState<Session | undefined>();
+  const [session, setSession] = React.useState<Session | undefined>(() =>
+    address && brokerId && chainId ? peekSession(brokerId, address, chainId) : undefined,
+  );
   React.useEffect(() => {
-    setSession(
-      address && brokerId && chainId ? peekSession(brokerId, address, chainId) : undefined,
-    );
+    // Update only when every input is present. The wallet connector re-emits
+    // during its periodic reconnects, and address/chainId pass through
+    // undefined for a moment each time; resetting the session on that flap
+    // made the whole panel bounce to "Setting up TWAP…" and back on a timer.
+    // A session that is genuinely dead is dropped by the query path (401 →
+    // forgetAll), not here.
+    if (!address || !brokerId || !chainId) return;
+    setSession(peekSession(brokerId, address, chainId));
   }, [address, brokerId, chainId]);
 
   React.useEffect(() => {
     let cancelled = false;
-    setRows(null);
+    // Deliberately no setRows(null) here: a session refresh (re-adopt, wallet
+    // reconnect) revalidates in place. Blanking first turned every refresh
+    // into a visible flash of the empty/loading state.
     const load = async () => {
       try {
         const list = await queryTickets(session, 50);
@@ -165,9 +174,11 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       } catch (e: any) {
         if (cancelled) return;
         // No session is not a failure — it is a state with an action attached.
+        // Keep whatever rows are already on screen either way: they are the
+        // last good answer, and the retry/adopt below replaces them when it
+        // has a better one.
         if (e instanceof NotSignedInError) setNeedsSignIn(true);
         else setError(e?.message ?? String(e));
-        setRows(null);
       }
     };
     load();
@@ -180,10 +191,14 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   }, [session]);
 
   const [busy, setBusy] = React.useState(false);
+  // Mirrors `busy` for reads that must not retrigger effects — see the adopt
+  // effect below, where listing `busy` as a dependency created a tight loop.
+  const busyRef = React.useRef(false);
 
   const enableTwap = React.useCallback(async () => {
     setError("");
     setBusy(true);
+    busyRef.current = true;
     try {
       const orderlyKey = address ? keyStore.getOrderlyKey(address) : null;
       // Name what is actually missing. "Connect your wallet and enable trading
@@ -212,6 +227,7 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       setError(e?.message ?? String(e));
     } finally {
       setBusy(false);
+      busyRef.current = false;
     }
   }, [address, brokerId, chainId, keyStore]);
 
@@ -221,17 +237,22 @@ export function BotPanel({ symbol }: { symbol?: string }) {
   // missing and a trading key is present, adopt silently; retry on a slow
   // cadence so a transient failure (Orderly briefly unreachable) recovers on
   // its own without a button and without hammering in a tight loop.
+  // `busy` is read through `busyRef`, NOT listed as a dependency: with it in
+  // the deps, every busy flip re-ran the effect, whose first act is another
+  // immediate tryAdopt() — so a persistently failing adopt retried in a tight
+  // busy-toggle loop instead of every 10s, hammering the server and strobing
+  // the "Setting up TWAP…" screen.
   React.useEffect(() => {
     if (!needsSignIn) return;
     const tryAdopt = () => {
-      if (busy || !address || !brokerId || !chainId) return;
+      if (busyRef.current || !address || !brokerId || !chainId) return;
       if (!keyStore.getOrderlyKey(address)) return; // trading not enabled — nothing to adopt
       void enableTwap();
     };
     tryAdopt();
     const id = setInterval(tryAdopt, 10_000);
     return () => clearInterval(id);
-  }, [needsSignIn, busy, address, brokerId, chainId, keyStore, enableTwap]);
+  }, [needsSignIn, address, brokerId, chainId, keyStore, enableTwap]);
 
   const end = React.useCallback(
     async (ticketId: string) => {
@@ -446,12 +467,18 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         </span>
       </div>
 
-      {needsSignIn ? (
+      {needsSignIn && rows === null ? (
         // No button here — adoption is automatic (see the effect above). This
         // is only what shows while it happens or if it cannot: when trading is
         // not yet enabled there is no key to adopt, so point at the exchange's
         // own "Enable Trading" (its action, not ours); otherwise adoption is in
         // flight, or it errored and the effect will retry.
+        //
+        // Gated on `rows === null` as well: once the panel has shown orders,
+        // a later NotSignedInError (session dropped mid-poll) re-adopts
+        // silently BEHIND the table instead of replacing it with this screen —
+        // the swap is what users reported as the panel "flashing
+        // Setting up TWAP…" on a timer.
         <div className="oui-flex oui-flex-col oui-items-center oui-gap-2 oui-px-3 oui-py-8 oui-text-center oui-text-base-contrast-36">
           {address && !keyStore.getOrderlyKey(address) ? (
             <span>Enable trading on the exchange to place and track TWAP orders.</span>
