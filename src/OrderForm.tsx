@@ -38,6 +38,14 @@ import {
   type Strategy,
 } from "./api.js";
 
+/**
+ * B2 — account-wide cap on concurrently working TWAP tickets. Front-end gate
+ * only (the executor does not enforce it this phase); the B2 message
+ * interpolates this value, so changing it here changes both the check and the
+ * copy.
+ */
+const MAX_ACTIVE_TICKETS = 20;
+
 /** Duration presets → time_constraint in ms. */
 const TIMEOUT_PRESETS: Array<{ label: string; ms: number }> = [
   { label: "5m", ms: 5 * 60_000 },
@@ -390,8 +398,8 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     if (isPretge && !isReduce)
       return { text: `${base}-PERP is a pre-market (pre-TGE) listing — you can only reduce or close a position`, tone: "red", blocking: true };
     // B2 — account-wide concurrency cap.
-    if (activeCount >= 20)
-      return { text: "You've reached the limit of 20 active TWAP orders. End an order to place a new one.", tone: "red", blocking: true };
+    if (activeCount >= MAX_ACTIVE_TICKETS)
+      return { text: `You've reached the limit of ${MAX_ACTIVE_TICKETS} active TWAP orders. End an order to place a new one.`, tone: "red", blocking: true };
     // Margin gate (§6.5.8): the executor is position-blind per ticket — each
     // ticket only ever tracks its own delta — so two small tickets on the same
     // symbol can each look fine alone and still jointly exceed the account's
