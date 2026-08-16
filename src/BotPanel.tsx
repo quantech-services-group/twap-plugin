@@ -319,15 +319,10 @@ export function BotPanel({ symbol }: { symbol?: string }) {
       width: 150,
       render: (_v, r) => <TicketId id={r.ticket_id} />,
     };
-    const endTime: Column<TicketProgress> = {
-      title: "End time",
-      dataIndex: "last_update_time_ms",
-      width: 160,
-      onSort: true,
-      render: (_v, r) => (
-        <span className="oui-text-base-contrast-54">{stamp(r.last_update_time_ms)}</span>
-      ),
-    };
+    // Running and History share one column set (§5.5): Ticket ID, Pair,
+    // Direction, Filled, Filled/Total, Initiated time, Duration. They differ
+    // only in the last column — Actions (End) while running, Status once done.
+    // (History used to carry an extra End time column; the spec dropped it.)
     const rest: Column<TicketProgress>[] = [
       {
         title: "Pair",
@@ -373,15 +368,6 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         ),
       },
       {
-        title: "Duration",
-        dataIndex: "time_constraint_ms",
-        width: 90,
-        onSort: true,
-        render: (_v, r) => (
-          <span className="oui-tabular-nums oui-text-base-contrast-54">{durationOf(r)}</span>
-        ),
-      },
-      {
         title: "Initiated time",
         dataIndex: "start_time_ms",
         width: 160,
@@ -390,12 +376,20 @@ export function BotPanel({ symbol }: { symbol?: string }) {
           <span className="oui-text-base-contrast-54">{stamp(r.start_time_ms)}</span>
         ),
       },
+      {
+        title: "Duration",
+        dataIndex: "time_constraint_ms",
+        width: 90,
+        onSort: true,
+        render: (_v, r) => (
+          <span className="oui-tabular-nums oui-text-base-contrast-54">{durationOf(r)}</span>
+        ),
+      },
     ];
 
     if (view === "history") {
       return [
         ticketId,
-        endTime,
         ...rest,
         {
           title: "Status",
