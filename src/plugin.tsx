@@ -79,9 +79,39 @@ function DataListWithBot({
 }) {
   const hostItems: any[] = Array.isArray(props?.items) ? props.items : [];
   const symbol = props?.symbol;
+
+  // BotPanel kept referentially stable so it never remounts — its polling,
+  // session and scroll state survive however often this slot re-renders.
+  const panel = React.useMemo(() => <BotPanel symbol={symbol} />, [symbol]);
+
+  // The host's TabPanel registers itself into an insertion-ordered map keyed by
+  // id and RE-registers (deleting its key, so it re-appends to the END) every
+  // time its content reference changes. The built-in tabs carry live data, so
+  // they re-register to the end as positions/orders update. Once Bot's content
+  // became stable (1.6.18, to stop a per-render re-registration storm — the
+  // flicker), Bot stopped re-registering and the churning built-ins piled up
+  // AFTER it, leaving Bot stranded first.
+  //
+  // So re-assert Bot's place at the end on a slow tick: hand the host a fresh
+  // content wrapper (`panel` inside stays the same reference, so BotPanel is
+  // NOT remounted) roughly once a second. Slow enough not to churn the strip
+  // (a per-render wrapper was the original flicker), fast enough that a
+  // built-in reorder only leaves Bot out of place for about a second. The
+  // delete+re-add of one React 18 passive-effect pass batches into a single
+  // commit, so an already-last Bot does not visibly move.
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // A NEW Fragment object each tick (no `key` — a changing key would remount
+  // its subtree and defeat the stable `panel`); its new reference is what makes
+  // the host's TabPanel effect re-run and re-register, while reconciliation
+  // keeps the same `panel` mounted underneath.
   const botItem = React.useMemo(
-    () => ({ id: BOT_TAB_ID, title: "Bot", content: <BotPanel symbol={symbol} /> }),
-    [symbol],
+    () => ({ id: BOT_TAB_ID, title: "Bot", content: <React.Fragment>{panel}</React.Fragment> }),
+    [panel, tick],
   );
   const items = React.useMemo(
     () => (hostItems.some((i) => i?.id === BOT_TAB_ID) ? hostItems : [...hostItems, botItem]),
