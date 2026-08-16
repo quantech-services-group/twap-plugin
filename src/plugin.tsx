@@ -59,19 +59,35 @@ function withTwapOption(Original: React.ComponentType<any>, props: any) {
  * Append the Bot tab to the host's data list. Its own tabs only know about
  * exchange orders, so a ticket would otherwise be visible only as scattered
  * child fills with nothing showing the order that produced them.
+ *
+ * A COMPONENT, not an inline builder, because the interceptor runs on every
+ * render of the host's data-list slot — and that slot re-renders several times
+ * a second on a trading page (order book, mark price, positions all tick).
+ * Building `items` and the `<BotPanel/>` element inline there handed the host a
+ * brand-new array and element identity on every tick, so the whole tab strip
+ * re-rendered (and BotPanel could remount) continuously — the flicker PM saw.
+ * Here the appended item and the panel are memoized on `symbol` alone, so
+ * between market ticks the host receives the exact same references and leaves
+ * the tab strip untouched.
  */
-function withBotTab(Original: React.ComponentType<any>, props: any) {
-  const items = Array.isArray(props?.items) ? props.items : [];
-  if (items.some((i: any) => i?.id === BOT_TAB_ID)) return <Original {...props} />;
-  return (
-    <Original
-      {...props}
-      items={[
-        ...items,
-        { id: BOT_TAB_ID, title: "Bot", content: <BotPanel symbol={props?.symbol} /> },
-      ]}
-    />
+function DataListWithBot({
+  Original,
+  props,
+}: {
+  Original: React.ComponentType<any>;
+  props: any;
+}) {
+  const hostItems: any[] = Array.isArray(props?.items) ? props.items : [];
+  const symbol = props?.symbol;
+  const botItem = React.useMemo(
+    () => ({ id: BOT_TAB_ID, title: "Bot", content: <BotPanel symbol={symbol} /> }),
+    [symbol],
   );
+  const items = React.useMemo(
+    () => (hostItems.some((i) => i?.id === BOT_TAB_ID) ? hostItems : [...hostItems, botItem]),
+    [hostItems, botItem],
+  );
+  return <Original {...props} items={items} />;
 }
 
 /**
@@ -127,13 +143,15 @@ export function registerTwapExec(): OrderlyPlugin {
       },
       {
         target: DATA_LIST_DESKTOP_TABS,
-        component: (Original: React.ComponentType<any>, props: any) =>
-          withBotTab(Original, props),
+        component: (Original: React.ComponentType<any>, props: any) => (
+          <DataListWithBot Original={Original} props={props} />
+        ),
       },
       {
         target: DATA_LIST_MOBILE_TABS,
-        component: (Original: React.ComponentType<any>, props: any) =>
-          withBotTab(Original, props),
+        component: (Original: React.ComponentType<any>, props: any) => (
+          <DataListWithBot Original={Original} props={props} />
+        ),
       },
       {
         target: BODY_TARGET,
