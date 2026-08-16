@@ -80,9 +80,29 @@ function formatQty(value: number, dp: number): string {
  * base_dp = 4 (lot 0.0001), "0.00005" simply cannot be entered — the trailing
  * 5 never lands — instead of being accepted and producing a ticket the
  * executor can never fill a slice of.
+ *
+ * Deliberately local rather than the SDK's own helpers
+ * (`inputFormatter.numberFormatter` / `dpFormatter` in @orderly.network/ui,
+ * `todpIfNeed` in @orderly.network/utils, which cover the same ground): those
+ * are shaped as `onSendBefore(value, options)` formatter objects for the
+ * SDK's <Input>, this form uses raw <input>s, and @orderly.network/utils is
+ * not one of our declared peers — one ten-line function beats coupling to
+ * either for three call sites.
  */
 function sanitizeAmount(raw: string, dp: number): string {
+  // A pasted exponent ("1.5e5") must not strip to "1.55" — a plausible-looking
+  // number of the wrong magnitude feeding a real order. Expand it to plain
+  // decimal first so the paste keeps its value (sign dropped — this box does
+  // not take negatives). Typed input can never contain an exponent: the
+  // character filter below eats [eE] as they are typed.
+  if (/^[+-]?(\d+\.?\d*|\.\d+)[eE][+-]?\d+$/.test(raw.trim())) {
+    const n = Number(raw.trim());
+    if (Number.isFinite(n)) raw = Math.abs(n).toFixed(Math.max(dp, 0));
+  }
   let s = raw.replace(/[^0-9.]/g, "");
+  // ".5" → "0.5", matching the SDK's own numberFormatter, so a value that
+  // round-trips through the store always re-parses the way it displays.
+  if (s.startsWith(".")) s = "0" + s;
   const dot = s.indexOf(".");
   if (dot === -1) return s;
   if (dp <= 0) return s.slice(0, dot);

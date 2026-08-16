@@ -80,6 +80,9 @@ function pctOf(t: TicketProgress): number {
 function durationOf(t: TicketProgress): string {
   const ms = t.time_constraint_ms;
   if (!Number.isFinite(ms) || ms <= 0) return "—";
+  // Rounded, not floored: form-placed tickets are whole minutes anyway, and a
+  // 59.6-minute ticket reading "59m" would be more misleading than "1h". The
+  // trade-off is that a 59,999ms test ticket reads "1m", not "<1m" — accepted.
   const totalMin = Math.round(ms / 60_000);
   if (totalMin < 1) return "<1m";
   const h = Math.floor(totalMin / 60);
@@ -173,6 +176,23 @@ export function BotPanel({ symbol }: { symbol?: string }) {
     // forgetAll), not here.
     if (!address || !brokerId || !chainId) return;
     setSession(peekSession(brokerId, address, chainId));
+  }, [address, brokerId, chainId]);
+
+  // Rows survive transient failures (below), so a REAL identity change —
+  // another wallet address, another chain, so another account's tickets —
+  // must blank them explicitly: keeping the previous identity's orders on
+  // screen while the new one loads would present someone else's positions as
+  // yours. Only a COMPLETE new identity counts; the connector's flaps
+  // (inputs momentarily undefined) are the case the session guard above
+  // exists for and must not blank anything.
+  const identityRef = React.useRef<string | undefined>(undefined);
+  React.useEffect(() => {
+    if (!address || !brokerId || !chainId) return;
+    const identity = `${brokerId}:${address.toLowerCase()}:${chainId}`;
+    if (identityRef.current !== undefined && identityRef.current !== identity) {
+      setRows(null);
+    }
+    identityRef.current = identity;
   }, [address, brokerId, chainId]);
 
   React.useEffect(() => {
