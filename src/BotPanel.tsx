@@ -72,16 +72,19 @@ function pctOf(t: TicketProgress): number {
 }
 
 /**
- * The ticket's execution window in minutes — "5 min", "0.5 min" for the
- * sub-minute windows tests use. Minutes because that is the unit the order
- * form takes the duration in, so the two read the same.
+ * The ticket's execution window as `2h 5m` / `6h` / `5m` (§5.5): unit
+ * segments, no zero padding, a zero segment dropped entirely. Hours and
+ * minutes because that is how the order form takes the duration in, so the
+ * two read the same. Sub-minute windows (test tickets) read `<1m`.
  */
-function timeoutOf(t: TicketProgress): string {
+function durationOf(t: TicketProgress): string {
   const ms = t.time_constraint_ms;
   if (!Number.isFinite(ms) || ms <= 0) return "—";
-  const min = ms / 60_000;
-  // One decimal, trimmed: 300000 → "5 min", 450000 → "7.5 min", 30000 → "0.5 min".
-  return `${Number(min.toFixed(1))} min`;
+  const totalMin = Math.round(ms / 60_000);
+  if (totalMin < 1) return "<1m";
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return [h > 0 && `${h}h`, m > 0 && `${m}m`].filter(Boolean).join(" ");
 }
 
 function sideOf(t: TicketProgress): string {
@@ -370,12 +373,12 @@ export function BotPanel({ symbol }: { symbol?: string }) {
         ),
       },
       {
-        title: "Timeout",
+        title: "Duration",
         dataIndex: "time_constraint_ms",
         width: 90,
         onSort: true,
         render: (_v, r) => (
-          <span className="oui-tabular-nums oui-text-base-contrast-54">{timeoutOf(r)}</span>
+          <span className="oui-tabular-nums oui-text-base-contrast-54">{durationOf(r)}</span>
         ),
       },
       {

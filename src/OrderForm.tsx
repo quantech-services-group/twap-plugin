@@ -59,6 +59,32 @@ function formatQty(value: number, dp: number): string {
   return String(Number(value.toFixed(dp)));
 }
 
+/**
+ * Keep a typed amount to what the market can actually trade: digits and at
+ * most one dot (anything else — signs, exponents, letters, a second dot — is
+ * dropped as typed), and no more than `dp` decimal places. Extra decimals are
+ * TRUNCATED rather than rounded: rounding half-up while typing can silently
+ * grow the size past what was typed (0.00046 → 0.0005), and an oversize is the
+ * one direction a trading input must never invent. `dp <= 0` means integers
+ * only — the dot itself is dropped (used by the duration fields).
+ *
+ * This is what makes a lot-size violation unrepresentable in the box: with
+ * base_dp = 4 (lot 0.0001), "0.00005" simply cannot be entered — the trailing
+ * 5 never lands — instead of being accepted and producing a ticket the
+ * executor can never fill a slice of.
+ */
+function sanitizeAmount(raw: string, dp: number): string {
+  let s = raw.replace(/[^0-9.]/g, "");
+  const dot = s.indexOf(".");
+  if (dot === -1) return s;
+  if (dp <= 0) return s.slice(0, dot);
+  const frac = s
+    .slice(dot + 1)
+    .replace(/\./g, "")
+    .slice(0, dp);
+  return s.slice(0, dot + 1) + frac;
+}
+
 /** "PERP_ETH_USDC" → { base: "ETH", quote: "USDC" }. */
 function splitSymbol(sym?: string): { base: string; quote: string } {
   const parts = (sym ?? "PERP_ETH_USDC").split("_");
@@ -132,6 +158,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   // precision the instrument does not trade in.
   const symbolInfo = useSymbolInfo(orderlySymbol);
   const baseDp: number = (symbolInfo?.("base_dp", 4) as number | undefined) ?? 4;
+  const quoteDp: number = (symbolInfo?.("quote_dp", 2) as number | undefined) ?? 2;
 
   // A permissionless / community listing trades isolated-margin only. The engine
   // DOES handle these now (it tags the order ISOLATED and round-trips the
@@ -211,6 +238,19 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     setNotionalState(String(Number((Number(qty) * price).toFixed(2))));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qty]);
+
+  // The quantity store is also written by the HOST — its slider and Max button
+  // put raw, unrounded figures in it (a max of 0.006111 on a 0.0001-lot market
+  // was placed verbatim and produced a ticket no slice of which conforms to the
+  // lot). Whatever the source, snap the stored value back to the market's
+  // precision the moment it appears; a value already conforming round-trips
+  // unchanged, so this cannot loop.
+  React.useEffect(() => {
+    if (!qty) return;
+    const clean = sanitizeAmount(qty, baseDp);
+    if (clean !== qty) setQuantity(clean);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qty, baseDp]);
 
   // Timeout is entered as hours + minutes; the ticket carries milliseconds.
   const hours = String(Math.floor(timeoutMs / 3_600_000) || 0);
@@ -597,7 +637,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
               className="oui-w-full oui-min-w-0 oui-flex-1 oui-bg-transparent oui-outline-none"
               inputMode="decimal"
               value={qty}
-              onChange={(e) => setQuantity(e.target.value)}
+              onChange={(e) => setQuantity(sanitizeAmount(e.target.value, baseDp))}
               placeholder="0"
             />
             <span className="oui-text-base-contrast-54">{base}</span>
@@ -610,7 +650,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
               className="oui-w-full oui-min-w-0 oui-flex-1 oui-bg-transparent oui-outline-none"
               inputMode="decimal"
               value={notional}
-              onChange={(e) => setNotional(e.target.value)}
+              onChange={(e) => setNotional(sanitizeAmount(e.target.value, quoteDp))}
               placeholder="0"
             />
             <span className="oui-text-base-contrast-54">{quote}</span>
@@ -620,14 +660,14 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
 
       {/* Execution window: an exact hours/minutes entry plus the common presets. */}
       <div className="oui-flex oui-flex-col oui-gap-1">
-        <span className="oui-text-xs">Timeout</span>
+        <span className="oui-text-xs">Duration</span>
         <div className="oui-grid oui-grid-cols-2 oui-gap-2">
           <div className="oui-flex oui-items-center oui-gap-1 oui-border oui-rounded oui-px-2 oui-py-1">
             <input
               className="oui-w-full oui-min-w-0 oui-flex-1 oui-bg-transparent oui-outline-none oui-text-xs"
               inputMode="numeric"
               value={hours}
-              onChange={(e) => setDuration(e.target.value, minutes)}
+              onChange={(e) => setDuration(sanitizeAmount(e.target.value, 0), minutes)}
               placeholder="0"
             />
             <span className="oui-text-xs oui-text-base-contrast-54">hr</span>
@@ -637,7 +677,7 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
               className="oui-w-full oui-min-w-0 oui-flex-1 oui-bg-transparent oui-outline-none oui-text-xs"
               inputMode="numeric"
               value={minutes}
-              onChange={(e) => setDuration(hours, e.target.value)}
+              onChange={(e) => setDuration(hours, sanitizeAmount(e.target.value, 0))}
               placeholder="0"
             />
             <span className="oui-text-xs oui-text-base-contrast-54">min</span>
