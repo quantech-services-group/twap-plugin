@@ -338,9 +338,20 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   // Max order quantity this account can afford for this market/side — the SDK
   // computes it from collateral, leverage, IMR and the existing position, so we
   // do not re-derive margin ourselves. Powers the B7 "Max quantity is …" line.
+  //
+  // Pass THIS market's margin mode. Without it the SDK defaults to CROSS and
+  // sizes against `totalCollateral`; on an isolated-margin-only market (a
+  // permissionless listing) that over-estimates — the real limit is the
+  // isolated position's own USDC margin (`freeCollateralUSDCOnly`). A trader
+  // with, say, only USDT collateral then passed this gate and placed a ticket
+  // the executor could never fill (every slice InsufficientMargin → EXPIRED at
+  // 0%). With the correct mode, the isolated path returns ~0 and B7 blocks it
+  // before it is placed. Cross markets report marginMode = CROSS, so their
+  // behaviour is unchanged.
   const maxQty = useMaxQty(
     orderlySymbol,
     side === "BUY" ? OrderSide.BUY : OrderSide.SELL,
+    { marginMode },
   );
 
   // Count of the account's still-working TWAP tickets, for the B2 concurrency

@@ -156,7 +156,7 @@ export function registerTwapExec(): OrderlyPlugin {
     name: "TWAP Execution",
     id: "twap-exec",
     // Keep in sync with package.json on every release.
-    version: "2.0.2",
+    version: "2.0.3",
     // Host SDK compatibility gate. Matches the value published Orderly plugins
     // use (e.g. Starchild's `>=2.10.1`) — a permissive floor rather than a
     // capped range, so a host on any current SDK keeps loading us instead of
