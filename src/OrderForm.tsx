@@ -301,8 +301,19 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
   const [positionInfo] = usePositionStream(orderlySymbol);
   const currentPosition =
     positionInfo?.rows?.find((r) => r.symbol === orderlySymbol)?.position_qty ?? 0;
-  const { freeCollateral } = useCollateral();
-  const available = freeCollateral ?? 0;
+  // Margin-mode-aware "available", matching the host's order form. Cross margin
+  // accepts any collateral, so `freeCollateral` is right; ISOLATED margin only
+  // accepts USDC, so the figure that can actually back an isolated order is
+  // `freeCollateralUSDCOnly`. A trader whose collateral is USDT therefore has
+  // cross-available > 0 but isolated-available = 0 — and on an isolated market
+  // must see (and be gated on) the 0. Using `freeCollateral` for both showed
+  // 11.79 on an isolated market where the host's own form correctly showed 0,
+  // and let a doomed order through. This is the same value the SDK's own
+  // Available component renders (it is not a public export, so we read the
+  // value, not the component).
+  const { freeCollateral, freeCollateralUSDCOnly } = useCollateral();
+  const isIsolatedMarket = marginMode === MarginMode.ISOLATED;
+  const available = (isIsolatedMarket ? freeCollateralUSDCOnly : freeCollateral) ?? 0;
 
   // Authenticated trader identity from the Orderly SDK session. The wallet
   // ADDRESS names the account our backend derives; the order then executes on
@@ -419,7 +430,10 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     const marketStatus = String(symbolInfo?.("status", "ACTIVE") ?? "ACTIVE");
     const isPretge = Boolean(symbolInfo?.("is_pretge", false));
     const minNotional = Number(symbolInfo?.("min_notional", 0)) || 0;
-    const avail = freeCollateral ?? 0;
+    // Margin-mode-aware (see `available` above): on an isolated market this is
+    // freeCollateralUSDCOnly, so a USDT-collateral account gets avail = 0 and
+    // B8 blocks — the market can never be funded by cross USDT.
+    const avail = available;
 
     // B1 — market not open for the intended direction.
     if (marketStatus === "REDUCE_ONLY" && !isReduce)
@@ -467,13 +481,21 @@ export function TwapOrderPanel({ symbol, api }: { symbol?: string; api?: any }) 
     // billions-size buy through because it was tagged reduce).
     if (maxQty > 0 && size > maxQty)
       return { text: `Insufficient balance. Max quantity is ${formatQty(maxQty, baseDp)} ${base}`, tone: "red", blocking: true };
-    // B8 — no collateral to OPEN with (reducing/closing needs none).
+    // B8 — no collateral to OPEN with (reducing/closing needs none). On an
+    // isolated market `avail` is USDC-only, so a USDT-collateral account lands
+    // here with a message that names the actual fix.
     if (!isReduce && avail <= 0)
-      return { text: "Insufficient balance. Deposit funds to continue.", tone: "red", blocking: true };
+      return {
+        text: isIsolatedMarket
+          ? `${base}-PERP trades in isolated margin, which accepts only USDC — convert some collateral to USDC to trade it`
+          : "Insufficient balance. Deposit funds to continue.",
+        tone: "red",
+        blocking: true,
+      };
     return null; // B11 — nothing to say.
   }, [
     isTradingEnabled, qty, side, currentPosition, symbolInfo, timeoutMs, price,
-    freeCollateral, maxQty, activeCount, openSizeThisSymbol, base, quote, baseDp,
+    available, isIsolatedMarket, maxQty, activeCount, openSizeThisSymbol, base, quote, baseDp,
   ]);
 
   // Clear the interim/error (B9) line whenever the trader edits the form — the
