@@ -23,11 +23,15 @@ import { registerTwapExec } from "twap-plugin";
 
 That is the whole setup. The execution backend is hosted for you and already
 pointed at; the plugin reads the active symbol and account from the Orderly SDK
-context and uses whatever `brokerId` your app already has. Requires the
-`@orderly.network/*` v3 SDK (declared as `orderlyVersion: "^3.0.0"`).
+context and uses whatever `brokerId` your app already has. It depends on the
+`@orderly.network/*` v3 packages (peer dependencies); the descriptor declares
+`orderlyVersion: ">=2.10.1"` for the host's compatibility gate.
 
-A trader's first TWAP asks their wallet to sign Orderly's `AddOrderlyKey` once,
-delegating for 30 days. Nothing reusable is stored in their browser.
+A trader's first TWAP costs **zero extra wallet signatures**: instead of prompting
+for its own delegation, the plugin adopts the Orderly trading key the DEX's own
+"Enable Trading" flow already delegated — it reads that key from the SDK's
+keyStore and hands it to the backend once, over TLS, where it is encrypted at
+rest so the executor can keep working after the tab closes.
 
 ## Execution
 
@@ -50,10 +54,10 @@ renders the order form (otherwise every slice would fail on margin).
 ## How a request proves who it is
 
 The browser generates an ECDSA P-256 keypair the first time you enable TWAP. Its
-public half is bound to your account at the moment Orderly confirms your wallet
-signed `AddOrderlyKey`; every later request carries a signature over that exact
-call. Nothing reusable crosses the network — a captured request yields a
-signature for one call at one instant.
+public half is bound to your account when the backend adopts your existing Orderly
+trading key (the one the DEX's "Enable Trading" already delegated); every later
+request carries a signature over that exact call. Nothing reusable crosses the
+network — a captured request yields a signature for one call at one instant.
 
 The private key lives in IndexedDB as a non-extractable `CryptoKey`: script on
 the page can ask it to sign but cannot read it out. Clearing site data or moving
