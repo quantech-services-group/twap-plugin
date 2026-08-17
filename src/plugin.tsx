@@ -156,7 +156,7 @@ export function registerTwapExec(): OrderlyPlugin {
     name: "TWAP Execution",
     id: "twap-exec",
     // Keep in sync with package.json on every release.
-    version: "2.0.0",
+    version: "2.0.1",
     // Host SDK compatibility. Matches our `@orderly.network/* ^3.0.0` peer deps
     // and the 3.1.8 runtime this was built and tested against; capped below the
     // next major, where the host's breaking changes are expected. Currently

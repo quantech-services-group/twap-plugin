@@ -1,13 +1,17 @@
 # twap-plugin
 
-TWAP algorithmic execution for the **Orderly Network Module Marketplace**.
+TWAP algorithmic execution as an **Orderly Network SDK plugin**.
 
-Adds a TWAP panel to the order form. Instead of sending the whole order at once,
-it works the order over a duration you choose, slicing it and placing as taker or
-maker. The panel replaces the order-entry body for the TWAP order type and leaves
-every other order type untouched.
+Adds a TWAP order type and a **Bot** tab to an Orderly-SDK DEX front-end. Instead
+of sending the whole order at once, it works the order over a duration you choose,
+slicing it and placing it as taker. The panel replaces the order-entry body for
+the TWAP order type and leaves every other order type untouched; the Bot tab lists
+the resulting tickets (Running / History) with their fill progress and duration.
 
 ## Install
+
+The plugin is bundled into your own Orderly-SDK front-end (there is no marketplace
+install — you host the front-end and register the plugin in it):
 
 ```tsx
 import { registerTwapExec } from "twap-plugin";
@@ -19,22 +23,29 @@ import { registerTwapExec } from "twap-plugin";
 
 That is the whole setup. The execution backend is hosted for you and already
 pointed at; the plugin reads the active symbol and account from the Orderly SDK
-context and uses whatever `brokerId` your app already has.
+context and uses whatever `brokerId` your app already has. Requires the
+`@orderly.network/*` v3 SDK (declared as `orderlyVersion: "^3.0.0"`).
 
 A trader's first TWAP asks their wallet to sign Orderly's `AddOrderlyKey` once,
 delegating for 30 days. Nothing reusable is stored in their browser.
 
-## Supported markets
+## Execution
 
-| Symbol | Supported |
-|---|---|
-| `PERP_ETH_USDC` — official Orderly listing | ✅ |
-| `PERP_CTEST_USDC_<suffix>` — non-official listing | ❌ |
+Every ticket runs **taker**: sliced market/IOC orders paced across the duration.
+(A maker mode exists in the code but is hidden until it paces across the whole
+window rather than filling as fast as the touch is hit.)
 
-A symbol with a fourth segment is not an official Orderly listing (every DEX can
-trade it — it is not broker-exclusive — but it trades in isolated-margin mode
-only). Smart execution trades cross-margin, so these are not supported: the panel
-says so and names the market rather than rendering a form that would fail later.
+Duration is entered as hours + minutes (1 minute to 168 hours); the server
+enforces the same bounds. The Bot tab shows each ticket's window as `2h 5m` /
+`6h` / `5m`.
+
+## Markets
+
+All official Orderly perps (`PERP_<BASE>_USDC`) are supported. A permissionless /
+community listing (a fourth symbol segment, e.g. `PERP_CTEST_USDC_<suffix>`) is
+also supported, but it trades **isolated-margin only** — so the form asks the
+trader to set that market to isolated margin on their account first, and only then
+renders the order form (otherwise every slice would fail on margin).
 
 ## How a request proves who it is
 
@@ -54,6 +65,7 @@ to another browser means onboarding again.
 |---|---|
 | `src/plugin.tsx` | `registerTwapExec()` — the interceptor descriptor |
 | `src/OrderForm.tsx` | `TwapOrderPanel` — the TWAP order form |
+| `src/BotPanel.tsx` | `BotPanel` — the Bot tab (Running / History tickets) |
 | `src/api.ts` | the backend client |
 | `src/signing.ts` | keypair generation, storage and request signing |
 | `src/mode.ts` | the TWAP order-type id |

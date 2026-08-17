@@ -1,7 +1,7 @@
 {
   "name": "twap-plugin",
-  "version": "2.0.0",
-  "description": "TWAP algorithmic execution for Orderly Network — taker and maker order entry with scheduled slicing. Shared markets only; broker-exclusive markets are not supported.",
+  "version": "2.0.1",
+  "description": "TWAP algorithmic execution plugin for Orderly Network SDK front-ends — sliced taker order entry over a chosen duration, with a Bot tab tracking running and past tickets.",
   "type": "module",
   "main": "dist/plugin.js",
   "module": "dist/plugin.js",
